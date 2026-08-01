@@ -1,0 +1,33 @@
+# Build tree. Also where JUCE itself is fetched to, so this is ~1 GB.
+build/
+cmake-build-*/
+
+# Built plug-in bundles
+*.component
+*.vst3
+*.app
+
+# Console tools built straight into the working directory by the
+# `clang++ -std=c++17 -O2 Tools/x_test.cpp -o x_test` lines in their headers
+/*_test
+/*_bench
+/imd*
+/verify
+
+# Snapshot and render output from the Tools/ programs. All regenerable:
+# BP303_Snapshot, BP303_FxTabSnapshot, drum_test, render_test and friends
+# write these into the working directory. Anything meant for the README
+# lives in docs/ and is committed deliberately.
+/*.png
+/*.wav
+/*.mid
+
+# Logs
+*.log
+
+# Claude Code's per-machine permission allowlist: absolute paths, local to you.
+# .claude/settings.json (shared settings) is fine to commit if you add one.
+.claude/settings.local.json
+
+# macOS
+.DS_Store
