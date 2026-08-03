@@ -159,7 +159,14 @@ private:
         if (holdPhase >= holdLength)
         {
             holdPhase -= holdLength;
-            held = std::round (s * crushLevels) / crushLevels;
+            // Mid-riser: the step straddles zero instead of sitting on it. A
+            // plain round() puts a step *centred* on zero, which swallows
+            // everything below half a step — at 1 bit that muted any line
+            // peaking under 0.5 outright, while a hotter one came through as a
+            // full-scale square. Same knob position, opposite results, decided
+            // by input level. Offsetting by half a step is inaudible at 8 bits
+            // and makes 1 bit an honest square at any level.
+            held = (std::floor (s * crushLevels) + 0.5f) / crushLevels;
         }
         return held;
     }

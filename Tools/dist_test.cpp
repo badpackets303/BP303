@@ -160,6 +160,54 @@ int main()
         check (levels > 1, "bit crusher flattened everything");
     }
     {
+        // The bottom of the BITS range must stay musical and, crucially, must
+        // not depend on how loud the line happens to be. A mid-tread quantiser
+        // used to return silence here for anything peaking under half a step,
+        // so a quiet line vanished while a hot one came through as a square.
+        for (float amp : { 0.2f, 0.5f, 0.9f })
+        {
+            auto p = base (Distortion::Crush);
+            p.bits = 1.0f;
+            p.rateSamples = 1.0f;
+            const auto out = run (p, sine (sr / 4, 220.0, amp));
+            const double level = rms (out, 128);
+            std::printf ("CRUSH 1-bit @ peak %.1f: rms=%.4f, %zu distinct values\n",
+                         amp, level, distinctValues (out, 128));
+            check (level > 0.1, "1-bit crush went silent");
+            check (distinctValues (out, 128) == 2, "1-bit crush is not a square");
+        }
+
+        // Two levels either side of zero, whatever the input level: the output
+        // of a 1-bit quantiser carries no amplitude information at all.
+        const auto quiet = run ([] { auto q = base (Distortion::Crush);
+                                     q.bits = 1.0f; q.rateSamples = 1.0f; return q; }(),
+                               sine (sr / 4, 220.0, 0.2f));
+        const auto loud  = run ([] { auto q = base (Distortion::Crush);
+                                     q.bits = 1.0f; q.rateSamples = 1.0f; return q; }(),
+                               sine (sr / 4, 220.0, 0.9f));
+        check (std::abs (rms (quiet, 128) - rms (loud, 128)) < 0.01,
+               "1-bit crush level depends on input level");
+    }
+    {
+        // BITS has to stay audible across the range the knob actually exposes,
+        // or the control reads as dead. Measured against the clean input.
+        const auto dry = sine (sr / 4, 220.0, 0.5f);
+        double previous = 1e9;
+        for (float bits : { 2.0f, 4.0f, 6.0f, 8.0f, 10.0f, 12.0f })
+        {
+            auto p = base (Distortion::Crush);
+            p.bits = bits;
+            p.rateSamples = 1.0f;
+            const auto out = run (p, dry);
+            std::vector<float> diff (dry.size());
+            for (size_t i = 0; i < dry.size(); ++i) diff[i] = out[i] - dry[i];
+            const double err = 20.0 * std::log10 (std::max (rms (diff, 128) / rms (dry, 128), 1e-12));
+            std::printf ("CRUSH %2.0f-bit: %6.1f dB from clean\n", bits, err);
+            check (err < previous - 3.0, "a step in BITS did not change the sound");
+            previous = err;
+        }
+    }
+    {
         auto p = base (Distortion::Crush);
         p.bits = 16.0f;           // transparent bit depth, isolate the hold
         p.rateSamples = 8.0f;

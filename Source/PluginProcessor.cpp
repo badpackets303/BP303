@@ -313,12 +313,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout BP303AudioProcessor::createP
             ParameterID { pre + "disttype", 1 }, name + " Dist Type",
             StringArray { "SOFT", "FUZZ", "CRUSH", "FOLD", "RECT" }, ln.defaultDist));
 
+        // BITS tops out at 12, not 16: past about 10 the quantisation noise is
+        // below -50 dB and the knob's remaining travel did nothing audible,
+        // which made the control read as broken. The default sits at 6 so
+        // selecting CRUSH sounds like a crusher rather than like a bypass.
         layout.add (std::make_unique<AudioParameterFloat> (
             ParameterID { pre + "crbits", 1 }, name + " Crush Bits",
-            NormalisableRange<float> (1.0f, 16.0f, 1.0f), 8.0f));
+            NormalisableRange<float> (1.0f, 12.0f, 1.0f), 6.0f));
+        // RATE defaults low so the decimation doesn't mask BITS. At the old
+        // default of 4 the sample-and-hold set the whole character and moving
+        // BITS anywhere above 6 measured identically.
         layout.add (std::make_unique<AudioParameterFloat> (
             ParameterID { pre + "crrate", 1 }, name + " Crush Rate",
-            NormalisableRange<float> (1.0f, 64.0f, 0.0f, 0.35f), 4.0f));
+            NormalisableRange<float> (1.0f, 64.0f, 0.0f, 0.35f), 2.0f));
 
         layout.add (std::make_unique<AudioParameterFloat> (
             ParameterID { pre + "foldamt", 1 }, name + " Fold Amount",
