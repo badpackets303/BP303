@@ -7,6 +7,7 @@
 #include "../Source/PluginProcessor.h"
 
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 namespace
@@ -160,6 +161,35 @@ int main()
                 std::printf ("  %s and %s render identically\n", names[i], names[j]);
             }
     check (allDistinct, "each type sounds different from the others");
+
+    // --- the CRUSH knobs must both read as "up is cleaner" ---
+    // RATE used to be the hold length in samples, so turning it up held each
+    // sample longer and *lowered* the rate — backwards from its label, and
+    // opposite to BITS sitting next to it. Both are now measured against the
+    // bypassed signal: turning either knob up has to move toward it.
+    {
+        const auto clean = renderFresh ([&] (BP303AudioProcessor& p) {
+            setP (p, "diston", 0.0f);
+        });
+
+        auto crushed = [&] (const char* knob, float norm) {
+            return renderFresh ([&] (BP303AudioProcessor& p) {
+                setP (p, "diston", 1.0f);
+                setP (p, "bdisttype", typeNorm[Distortion::Crush]);
+                // pin the other knob wide open so this one is what moves
+                setP (p, std::strcmp (knob, "bcrrate") == 0 ? "bcrbits" : "bcrrate", 1.0f);
+                setP (p, knob, norm);
+            });
+        };
+
+        for (const char* knob : { "bcrrate", "bcrbits" })
+        {
+            const double up   = difference (crushed (knob, 1.0f), clean);
+            const double down = difference (crushed (knob, 0.0f), clean);
+            std::printf ("  %s: up=%.5f from clean, down=%.5f\n", knob, up, down);
+            check (up < down, "turning this crush knob up must move toward clean");
+        }
+    }
 
     // --- LOWS is wired: keeping the lows changes what comes out ---
     {

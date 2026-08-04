@@ -320,12 +320,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout BP303AudioProcessor::createP
         layout.add (std::make_unique<AudioParameterFloat> (
             ParameterID { pre + "crbits", 1 }, name + " Crush Bits",
             NormalisableRange<float> (1.0f, 12.0f, 1.0f), 6.0f));
-        // RATE defaults low so the decimation doesn't mask BITS. At the old
-        // default of 4 the sample-and-hold set the whole character and moving
-        // BITS anywhere above 6 measured identically.
+        // RATE is the fraction of the host rate the crusher runs at, so turning
+        // the knob up raises the rate the way the label says. It used to be the
+        // hold length in samples, which ran backwards: up meant holding longer,
+        // meaning a *lower* rate, opposite to BITS on the same page. 1.0 is the
+        // host rate untouched; 1/64 holds each sample for 64 of them. The
+        // default of 0.5 keeps the decimation light enough not to mask BITS.
         layout.add (std::make_unique<AudioParameterFloat> (
             ParameterID { pre + "crrate", 1 }, name + " Crush Rate",
-            NormalisableRange<float> (1.0f, 64.0f, 0.0f, 0.35f), 2.0f));
+            NormalisableRange<float> (1.0f / 64.0f, 1.0f, 0.0f, 0.3f), 0.5f));
 
         layout.add (std::make_unique<AudioParameterFloat> (
             ParameterID { pre + "foldamt", 1 }, name + " Fold Amount",
@@ -358,7 +361,8 @@ Distortion::Params BP303AudioProcessor::distParams (const DistIds& ids) const
     p.drive       = apvts.getRawParameterValue (ids.drive)->load();
     p.color       = apvts.getRawParameterValue (ids.color)->load();
     p.bits        = apvts.getRawParameterValue (ids.bits)->load();
-    p.rateSamples = apvts.getRawParameterValue (ids.rate)->load();
+    // The knob is a rate; the shaper wants the hold length that produces it.
+    p.rateSamples = 1.0f / std::max (1.0e-3f, apvts.getRawParameterValue (ids.rate)->load());
     p.foldAmount  = apvts.getRawParameterValue (ids.foldAmount)->load();
     p.foldSym     = apvts.getRawParameterValue (ids.foldSym)->load();
     p.rectAmount  = apvts.getRawParameterValue (ids.rectAmount)->load();
