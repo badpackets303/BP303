@@ -302,11 +302,77 @@ void Look303::setSkin (int skinIndex)
     setColour (juce::TextButton::textColourOnId, juce::Colour (0xff23201c));
 }
 
+namespace
+{
+    // How far into the extreme end of the travel a position sits, 0 anywhere
+    // else. Which end that is comes from the knob itself — see ui303::HotEnd.
+    float hotAmount (float t, int hot)
+    {
+        constexpr float zone = 0.28f;   // the last quarter or so of the travel
+        if (hot > 0) return t <= 1.0f - zone ? 0.0f : (t - (1.0f - zone)) / zone;
+        if (hot < 0) return t >= zone ? 0.0f : (zone - t) / zone;
+        return 0.0f;
+    }
+
+    // The skin's accent, taken apart once per knob rather than per tick.
+    // juce::Colour stores RGB and converts on every getHue/withMultiplied* call,
+    // so building the tint by chaining those cost five round trips per colour —
+    // times eleven ticks, times every knob, times every frame.
+    struct Accent { float h, s, v; };
+
+    // The accent, coloured by where along the travel it sits.
+    //
+    // Derived from the palette's own accent rather than named outright, so it
+    // rides the key-hue dial instead of fighting it: rotate the dial and the
+    // ramp rotates with it. Saturation and brightness carry the ordinary
+    // travel, which keeps each skin's accent recognisably its own colour for
+    // most of the sweep.
+    juce::Colour valueTint (const Accent& a, float t, int hot)
+    {
+        float h = a.h;
+        float s = a.s * (0.70f + 0.30f * t);
+        float v = a.v * (0.78f + 0.22f * t);
+
+        // Only the knobs that actually have an extreme end get the warning, and
+        // it is a rotation of the accent toward red rather than a blend toward
+        // Palette::red — that field is each skin's *second* accent, not a
+        // warning colour, and on Neon Slate it sits one degree from the first,
+        // so blending toward it there does nothing at all. An absolute red
+        // would read, but it would be the one colour on the panel the key-hue
+        // dial could not move.
+        if (const float amount = hotAmount (t, hot); amount > 0.0f)
+        {
+            const float target = h > 0.5f ? 1.0f : 0.0f;   // red, the short way
+            const float rot = juce::jmin (std::abs (target - h), 0.16f) * amount;
+            h += target > h ? rot : -rot;
+            if (h < 0.0f)  h += 1.0f;
+            if (h >= 1.0f) h -= 1.0f;
+            s *= 1.0f + 0.22f * amount;
+            v *= 1.0f + 0.12f * amount;
+        }
+
+        return juce::Colour::fromHSV (h, juce::jmin (1.0f, s), juce::jmin (1.0f, v), 1.0f);
+    }
+
+    // A knob's cap catches the light differently as it turns. Physically a
+    // smooth dome would not, but these caps read as turned or brushed metal and
+    // the grain goes round with them. Only a fraction of the rotation is used:
+    // at full travel the highlight would swing right under the pointer and the
+    // knob would look like it was spinning rather than being turned.
+    constexpr float highlightFollow = 0.35f;
+}
+
 void Look303::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h,
                                 float sliderPos, float startAngle, float endAngle,
-                                juce::Slider&)
+                                juce::Slider& slider)
 {
     const auto& p = ui303::palette (skin);
+    const int hot = (int) slider.getProperties().getWithDefault ("hotEnd", 0);
+    const Accent accent { p.orange.getHue(), p.orange.getSaturation(),
+                          p.orange.getBrightness() };
+    // how far the cap's lighting has drifted round with the knob
+    const float lightAngle = (startAngle + sliderPos * (endAngle - startAngle))
+                                 * highlightFollow;
     auto bounds = juce::Rectangle<float> ((float) x, (float) y, (float) w, (float) h)
                       .reduced (3.0f);
     const float radius = juce::jmin (bounds.getWidth(), bounds.getHeight()) * 0.5f;
@@ -314,6 +380,14 @@ void Look303::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h,
     const float angle = startAngle + sliderPos * (endAngle - startAngle);
     const float body = radius * 0.74f;
     juce::Rectangle<float> bodyRect (centre.x - body, centre.y - body, body * 2, body * 2);
+
+    // Where the cap's highlight sits, swung part of the way round with the knob.
+    auto litFrom = [&] (float ox, float oy)
+    {
+        const float s = std::sin (lightAngle), c = std::cos (lightAngle);
+        return juce::Point<float> (centre.x + ox * c - oy * s,
+                                   centre.y + ox * s + oy * c);
+    };
 
     // Level notches around the knob: lit amber up to the current value, dim
     // above it — a small LED-collar level indicator on every skin. Drawn on
@@ -329,9 +403,20 @@ void Look303::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h,
             const float a  = startAngle + tt * (endAngle - startAngle);
             const bool  lit = a <= angle + 1.0e-3f;
             const float s = std::sin (a), c = std::cos (a);
-            g.setColour (lit ? p.orange : p.tickArc.withAlpha (0.7f));
-            g.drawLine (centre.x + s * ri, centre.y - c * ri,
-                        centre.x + s * ro, centre.y - c * ro, lit ? 1.7f : 1.2f);
+            // Each tick is tinted for its own place on the dial, not for where
+            // the knob currently sits, so the collar is a ramp that turning
+            // uncovers rather than a block of colour that changes wholesale.
+            //
+            // Ticks in the extreme zone lengthen and thicken as well as shift
+            // colour. On a mark this small the hue change alone is almost
+            // invisible, and it would carry nothing at all to someone who reads
+            // the two hues as the same — the size change does the work.
+            const float warn  = lit ? hotAmount (tt, hot) : 0.0f;
+            const float inner = ri - warn * (ro - ri) * 0.55f;
+            g.setColour (lit ? valueTint (accent, tt, hot) : p.tickArc.withAlpha (0.7f));
+            g.drawLine (centre.x + s * inner, centre.y - c * inner,
+                        centre.x + s * ro, centre.y - c * ro,
+                        lit ? 1.7f + warn * 1.4f : 1.2f);
         }
     };
 
@@ -354,21 +439,37 @@ void Look303::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h,
             juce::Path value;
             value.addCentredArc (centre.x, centre.y, ringR, ringR, 0.0f,
                                  startAngle, angle, true);
-            g.setColour (p.orange.withAlpha (0.28f));
+            g.setColour (valueTint (accent, sliderPos, hot).withAlpha (0.28f));
             g.strokePath (value, juce::PathStrokeType (thick + 3.0f,
                                                        juce::PathStrokeType::curved,
                                                        juce::PathStrokeType::butt));
-            g.setColour (p.orange);
-            g.strokePath (value, stroke);
+
+            // A ColourGradient is linear or radial and never angular, so the
+            // ramp round the ring is laid down as a short run of arcs. They
+            // overlap by a hair; drawn exactly end to end the joins read as
+            // notches in the ring.
+            constexpr int segments = 12;
+            const float span = angle - startAngle;
+            for (int i = 0; i < segments; ++i)
+            {
+                const float a0 = startAngle + span * (float) i / (float) segments;
+                const float a1 = juce::jmin (angle,
+                                             startAngle + span * (float) (i + 1)
+                                                 / (float) segments + 0.015f);
+                juce::Path seg;
+                seg.addCentredArc (centre.x, centre.y, ringR, ringR, 0.0f, a0, a1, true);
+                g.setColour (valueTint (accent, sliderPos * ((float) i + 0.5f)
+                                                   / (float) segments, hot));
+                g.strokePath (seg, stroke);
+            }
         }
 
         const float capR = juce::jmax (4.0f, radius - thick - 2.5f);
         juce::Rectangle<float> capRect (centre.x - capR, centre.y - capR, capR * 2, capR * 2);
-        juce::ColourGradient cap (p.knobFace1,
-                                  centre.x - capR * 0.32f, centre.y - capR * 0.44f,
+        const auto capLit = litFrom (-capR * 0.32f, -capR * 0.44f);
+        juce::ColourGradient cap (p.knobFace1, capLit.x, capLit.y,
                                   p.knobFace2,
-                                  centre.x - capR * 0.32f + capR * 1.5f,
-                                  centre.y - capR * 0.44f + capR * 1.5f, true);
+                                  capLit.x + capR * 1.5f, capLit.y + capR * 1.5f, true);
         g.setGradientFill (cap);
         g.fillEllipse (capRect);
         g.setColour (juce::Colours::black.withAlpha (0.4f));
@@ -425,12 +526,10 @@ void Look303::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h,
         g.setColour (juce::Colour (0xff3f3d39));
         g.drawEllipse (collarRect, 1.0f);
 
-        // domed cap: radial gradient with the highlight toward upper-left
-        juce::ColourGradient cap (p.knobFace1,
-                                  centre.x - capR * 0.32f, centre.y - capR * 0.38f,
-                                  p.knobFace2,
-                                  centre.x - capR * 0.32f + capR, centre.y - capR * 0.38f,
-                                  true);
+        // domed cap: radial gradient, highlight upper-left and drifting with the knob
+        const auto capLit = litFrom (-capR * 0.32f, -capR * 0.38f);
+        juce::ColourGradient cap (p.knobFace1, capLit.x, capLit.y,
+                                  p.knobFace2, capLit.x + capR, capLit.y, true);
         cap.addColour (0.72, p.knobFace1.interpolatedWith (p.knobFace2, 0.5f));
         g.setGradientFill (cap);
         g.fillEllipse (capRect);
@@ -441,10 +540,10 @@ void Look303::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h,
         g.setColour (juce::Colours::white.withAlpha (0.22f));
         g.drawEllipse (capRect.reduced (capR * 0.16f), 1.0f);
 
-        // specular highlight arc, upper-left
+        // specular highlight arc, upper-left, travelling with the cap
         juce::Path spec;
         spec.addCentredArc (centre.x, centre.y, capR * 0.80f, capR * 0.80f,
-                            0.0f, -2.5f, -1.0f, true);
+                            0.0f, -2.5f + lightAngle, -1.0f + lightAngle, true);
         g.setColour (juce::Colours::white.withAlpha (0.42f));
         g.strokePath (spec, juce::PathStrokeType (2.0f, juce::PathStrokeType::curved,
                                                   juce::PathStrokeType::rounded));
@@ -479,10 +578,9 @@ void Look303::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h,
         g.drawEllipse (wellRect.reduced (0.6f), 1.2f);
 
         // knob cap: charcoal dome, slightly lit from upper-left
-        juce::ColourGradient cap (p.knobFace1,
-                                  centre.x - capR * 0.3f, centre.y - capR * 0.4f,
-                                  p.knobFace2,
-                                  centre.x - capR * 0.3f + capR, centre.y - capR * 0.4f, true);
+        const auto capLit = litFrom (-capR * 0.3f, -capR * 0.4f);
+        juce::ColourGradient cap (p.knobFace1, capLit.x, capLit.y,
+                                  p.knobFace2, capLit.x + capR, capLit.y, true);
         g.setGradientFill (cap);
         g.fillEllipse (capRect);
         g.setColour (p.knobEdge);
@@ -490,7 +588,7 @@ void Look303::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h,
         // top highlight sliver
         juce::Path capSpec;
         capSpec.addCentredArc (centre.x, centre.y, capR * 0.86f, capR * 0.86f,
-                               0.0f, -2.4f, -0.9f, true);
+                               0.0f, -2.4f + lightAngle, -0.9f + lightAngle, true);
         g.setColour (juce::Colours::white.withAlpha (0.10f));
         g.strokePath (capSpec, juce::PathStrokeType (1.6f));
 
@@ -511,19 +609,19 @@ void Look303::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h,
     g.setColour (juce::Colours::black.withAlpha (0.45f));
     g.fillEllipse (bodyRect.translated (0.0f, 1.8f).expanded (0.4f));
 
-    juce::ColourGradient face (p.knobFace1,
-                               centre.x - body * 0.5f, centre.y - body * 0.6f,
+    const auto faceLit = litFrom (-body * 0.5f, -body * 0.6f);
+    juce::ColourGradient face (p.knobFace1, faceLit.x, faceLit.y,
                                p.knobFace2,
-                               centre.x + body * 0.6f, centre.y + body * 0.9f, true);
+                               faceLit.x + body * 1.1f, faceLit.y + body * 1.5f, true);
     g.setGradientFill (face);
     g.fillEllipse (bodyRect);
     g.setColour (p.knobEdge);
     g.drawEllipse (bodyRect, 1.8f);
 
-    // specular highlight, upper-left
+    // specular highlight, upper-left, travelling with the face
     juce::Path spec;
     spec.addCentredArc (centre.x, centre.y, body - 2.5f, body - 2.5f,
-                        0.0f, -2.4f, -1.1f, true);
+                        0.0f, -2.4f + lightAngle, -1.1f + lightAngle, true);
     g.setColour (juce::Colours::white.withAlpha (0.28f));
     g.strokePath (spec, juce::PathStrokeType (2.0f, juce::PathStrokeType::curved,
                                               juce::PathStrokeType::rounded));
@@ -2732,9 +2830,13 @@ void SongList::clearSong()
 void BP303AudioProcessorEditor::Knob::init (juce::Component& parent,
                                             juce::AudioProcessorValueTreeState& apvts,
                                             const juce::String& paramId,
-                                            const juce::String& text)
+                                            const juce::String& text,
+                                            int hotEnd)
 {
     parent.addAndMakeVisible (slider);
+    // The look-and-feel draws every knob through one function and has no idea
+    // which parameter it is looking at, so the hot end rides along as a property.
+    slider.getProperties().set ("hotEnd", hotEnd);
     att = std::make_unique<SliderAtt> (apvts, paramId, slider);
     label.setText (text, juce::dontSendNotification);
     label.setJustificationType (juce::Justification::centred);
@@ -2865,7 +2967,7 @@ BP303AudioProcessorEditor::BP303AudioProcessorEditor (BP303AudioProcessor& p)
     wave.init (content, proc, proc.apvts, "wave", "WAVE");
     tuning.init (content, proc.apvts, "tuning", "TUNING");
     cutoff.init (content, proc.apvts, "cutoff", "CUT OFF");
-    resonance.init (content, proc.apvts, "resonance", "RESONANCE");
+    resonance.init (content, proc.apvts, "resonance", "RESONANCE", ui303::HotTop);
     envmod.init (content, proc.apvts, "envmod", "ENV MOD");
     decay.init (content, proc.apvts, "decay", "DECAY");
     accent.init (content, proc.apvts, "accent", "ACCENT");
@@ -2901,13 +3003,13 @@ BP303AudioProcessorEditor::BP303AudioProcessorEditor (BP303AudioProcessor& p)
     bassDistType.init (bassDistPage, proc.apvts, "bdisttype", "TYPE");
     bassDistLows.init (bassDistPage, proc.apvts, "bdistlows", "LOWS");
 
-    distDrive.init (bassDriveGroup, proc.apvts, "distdrive", "DRIVE");
+    distDrive.init (bassDriveGroup, proc.apvts, "distdrive", "DRIVE", ui303::HotTop);
     distColor.init (bassDriveGroup, proc.apvts, "distcolor", "COLOR");
-    bassCrushBits.init (bassCrushGroup, proc.apvts, "bcrbits", "BITS");
-    bassCrushRate.init (bassCrushGroup, proc.apvts, "bcrrate", "RATE");
-    bassFoldAmt.init (bassFoldGroup, proc.apvts, "bfoldamt", "FOLD");
+    bassCrushBits.init (bassCrushGroup, proc.apvts, "bcrbits", "BITS", ui303::HotBottom);
+    bassCrushRate.init (bassCrushGroup, proc.apvts, "bcrrate", "RATE", ui303::HotBottom);
+    bassFoldAmt.init (bassFoldGroup, proc.apvts, "bfoldamt", "FOLD", ui303::HotTop);
     bassFoldSym.init (bassFoldGroup, proc.apvts, "bfoldsym", "SYM");
-    bassRectAmt.init (bassRectGroup, proc.apvts, "brectamt", "AMOUNT");
+    bassRectAmt.init (bassRectGroup, proc.apvts, "brectamt", "AMOUNT", ui303::HotTop);
     bassRectTone.init (bassRectGroup, proc.apvts, "brecttone", "TONE");
 
     for (auto* g : { &bassDriveGroup, &bassCrushGroup, &bassFoldGroup, &bassRectGroup })
@@ -2918,14 +3020,14 @@ BP303AudioProcessorEditor::BP303AudioProcessorEditor (BP303AudioProcessor& p)
     delayOnAtt = std::make_unique<ButtonAtt> (proc.apvts, "delayon", delayOn);
     delayType.init (bassDelayPage, proc.apvts, "delaytype", "TYPE");
     delayTime.init (bassDelayPage, proc.apvts, "delaytime", "TIME");
-    delayFb.init (bassDelayPage, proc.apvts, "delayfb", "FEEDBACK");
+    delayFb.init (bassDelayPage, proc.apvts, "delayfb", "FEEDBACK", ui303::HotTop);
     delayMix.init (bassDelayPage, proc.apvts, "delaymix", "MIX");
 
     bassFilterPage.addAndMakeVisible (bassFltOn);
     bassFltOnAtt = std::make_unique<ButtonAtt> (proc.apvts, "bflton", bassFltOn);
     bassFltMode.init (bassFilterPage, proc, proc.apvts, "bfltmode", "MODE");
     bassFltCut.init (bassFilterPage, proc.apvts, "bfltcut", "CUTOFF");
-    bassFltRes.init (bassFilterPage, proc.apvts, "bfltres", "RES");
+    bassFltRes.init (bassFilterPage, proc.apvts, "bfltres", "RES", ui303::HotTop);
     bassFltEnv.init (bassFilterPage, proc.apvts, "bfltenv", "ENV");
 
     bassCompPage.addAndMakeVisible (bassCompOn);
@@ -2969,13 +3071,13 @@ BP303AudioProcessorEditor::BP303AudioProcessorEditor (BP303AudioProcessor& p)
     drumDistType.init (drumDistPage, proc.apvts, "ddisttype", "TYPE");
     drumDistLows.init (drumDistPage, proc.apvts, "ddistlows", "LOWS");
 
-    drumDrive.init (drumDriveGroup, proc.apvts, "drumdrive", "DRIVE");
+    drumDrive.init (drumDriveGroup, proc.apvts, "drumdrive", "DRIVE", ui303::HotTop);
     drumDistColor.init (drumDriveGroup, proc.apvts, "ddistcolor", "COLOR");
-    drumCrushBits.init (drumCrushGroup, proc.apvts, "dcrbits", "BITS");
-    drumCrushRate.init (drumCrushGroup, proc.apvts, "dcrrate", "RATE");
-    drumFoldAmt.init (drumFoldGroup, proc.apvts, "dfoldamt", "FOLD");
+    drumCrushBits.init (drumCrushGroup, proc.apvts, "dcrbits", "BITS", ui303::HotBottom);
+    drumCrushRate.init (drumCrushGroup, proc.apvts, "dcrrate", "RATE", ui303::HotBottom);
+    drumFoldAmt.init (drumFoldGroup, proc.apvts, "dfoldamt", "FOLD", ui303::HotTop);
     drumFoldSym.init (drumFoldGroup, proc.apvts, "dfoldsym", "SYM");
-    drumRectAmt.init (drumRectGroup, proc.apvts, "drectamt", "AMOUNT");
+    drumRectAmt.init (drumRectGroup, proc.apvts, "drectamt", "AMOUNT", ui303::HotTop);
     drumRectTone.init (drumRectGroup, proc.apvts, "drecttone", "TONE");
 
     for (auto* g : { &drumDriveGroup, &drumCrushGroup, &drumFoldGroup, &drumRectGroup })
@@ -2988,14 +3090,14 @@ BP303AudioProcessorEditor::BP303AudioProcessorEditor (BP303AudioProcessor& p)
     drumDelayOnAtt = std::make_unique<ButtonAtt> (proc.apvts, "ddelayon", drumDelayOn);
     drumDelayType.init (drumDelayPage, proc.apvts, "ddelaytype", "TYPE");
     drumDelayTime.init (drumDelayPage, proc.apvts, "ddelaytime", "TIME");
-    drumDelayFb.init (drumDelayPage, proc.apvts, "ddelayfb", "FEEDBACK");
+    drumDelayFb.init (drumDelayPage, proc.apvts, "ddelayfb", "FEEDBACK", ui303::HotTop);
     drumDelayMix.init (drumDelayPage, proc.apvts, "ddelaymix", "MIX");
 
     drumFilterPage.addAndMakeVisible (drumFltOn);
     drumFltOnAtt = std::make_unique<ButtonAtt> (proc.apvts, "dflton", drumFltOn);
     drumFltMode.init (drumFilterPage, proc, proc.apvts, "dfltmode", "MODE");
     drumFltCut.init (drumFilterPage, proc.apvts, "dfltcut", "CUTOFF");
-    drumFltRes.init (drumFilterPage, proc.apvts, "dfltres", "RES");
+    drumFltRes.init (drumFilterPage, proc.apvts, "dfltres", "RES", ui303::HotTop);
     drumFltEnv.init (drumFilterPage, proc.apvts, "dfltenv", "ENV");
 
     drumCompPage.addAndMakeVisible (drumCompOn);

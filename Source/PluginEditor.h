@@ -8,6 +8,13 @@ namespace ui303
     enum KnobStyle { KnobFlat = 0, KnobMetalArc = 1, KnobPlastic = 2, KnobRecessed = 3,
                      KnobArcRing = 4 };
 
+    // Which end of a knob's travel is the extreme one, for the warning tint.
+    // It cannot be assumed: RESONANCE and DRIVE get wild at the top, but the
+    // CRUSH knobs are a rate and a bit depth, so their clean end is the top and
+    // it is the *bottom* that destroys the signal. Most knobs have no extreme
+    // end at all and stay the plain accent the whole way round.
+    enum HotEnd { HotNone = 0, HotTop = 1, HotBottom = -1 };
+
     struct Palette
     {
         bool retro = false;
@@ -657,7 +664,8 @@ private:
         std::unique_ptr<SliderAtt> att;
 
         void init (juce::Component& parent, juce::AudioProcessorValueTreeState& apvts,
-                   const juce::String& paramId, const juce::String& text);
+                   const juce::String& paramId, const juce::String& text,
+                   int hotEnd = ui303::HotNone);
         void setBounds (juce::Rectangle<int> r);
     };
 

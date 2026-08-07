@@ -81,6 +81,22 @@ target_link_libraries(BP303_FxTabSnapshot PRIVATE
     juce::juce_dsp
     juce::juce_recommended_config_flags)
 
+# Renders one knob across its whole travel, per skin, for judging anything that
+# varies along the sweep — the editor snapshots only ever show one position
+juce_add_console_app(BP303_KnobSnapshot PRODUCT_NAME "BP303_KnobSnapshot")
+target_sources(BP303_KnobSnapshot PRIVATE
+    Tools/knob_snapshot.cpp
+    Source/PluginProcessor.cpp
+    Source/PluginEditor.cpp)
+target_compile_definitions(BP303_KnobSnapshot PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JucePlugin_Name="BP303")
+target_link_libraries(BP303_KnobSnapshot PRIVATE
+    juce::juce_audio_utils
+    juce::juce_dsp
+    juce::juce_recommended_config_flags)
+
 # Headless reproduction of an audio-device / sample-rate change with a live editor
 juce_add_console_app(BP303_DeviceTest PRODUCT_NAME "BP303_DeviceTest")
 target_sources(BP303_DeviceTest PRIVATE
