@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <vector>
 
 // Monophonic 303-style voice: PolyBLEP saw/pulse oscillator into a
@@ -96,8 +97,15 @@ public:
 
     void noteOff (int note)
     {
-        heldNotes.erase (std::remove (heldNotes.begin(), heldNotes.end(), note),
-                         heldNotes.end());
+        // Pop the *newest* matching note rather than every copy of it. The
+        // sequencer fires a step's note-on before releasing the step before it,
+        // so the gate never drops and the voice glides; when both name the same
+        // number — a pattern wrapping from a note straight back onto itself —
+        // erasing every copy took the note that had just started with it, and
+        // the line went silent until some other pitch came round.
+        const auto last = std::find (heldNotes.rbegin(), heldNotes.rend(), note);
+        if (last != heldNotes.rend())
+            heldNotes.erase (std::next (last).base());
 
         if (heldNotes.empty())
             gate = false;

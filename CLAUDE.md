@@ -24,7 +24,7 @@ builds an app instead.
 
 Two kinds, both headless. Run both before calling anything done.
 
-**CMake targets** — 21 of them, one per `Tools/*_test.cpp` that is wired up:
+**CMake targets** — 22 of them, one per `Tools/*_test.cpp` that is wired up:
 
 ```bash
 cmake --build build -j8 && for t in build/BP303_*Test_artefacts/Release/BP303_*Test; do "$t" >/dev/null || echo "FAIL $t"; done
