@@ -1,0 +1,124 @@
+# Builds the standalone app for both platforms.
+#
+# BP303 is developed on macOS, so the Windows build only exists here — this
+# workflow is the only thing that compiles it. Push a v* tag and the two zips
+# are attached to a GitHub Release.
+#
+# JUCE is fetched by CMake at configure time and is most of the build, so the
+# FetchContent tree is cached against the tag pinned in CMakeLists.txt.
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            name: macOS
+          - os: windows-latest
+            name: Windows
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keyed on the whole of CMakeLists.txt, which is where the JUCE tag lives.
+      # Coarser than it needs to be — an unrelated edit re-clones JUCE — but it
+      # can never serve a stale clone after a version bump, which is the failure
+      # that would actually cost an afternoon.
+      - name: Cache JUCE
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: juce-${{ matrix.os }}-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build standalone
+        run: cmake --build build --config Release --target BP303_Standalone --parallel 4
+
+      # The JUCE-free DSP and sequencer tests. These are the ones worth running on
+      # both platforms: they are plain C++17 with no GUI, so a difference between
+      # them is a real portability bug rather than a headless-runner artefact.
+      # The editor and plugin-hosting tests stay on the macOS-only local run.
+      - name: Build portable tests
+        run: >
+          cmake --build build --config Release --parallel 4
+          --target BP303_WaveTest BP303_DistTest BP303_MasterTest
+          BP303_DynFiltTest BP303_SpaceTest BP303_SongTest BP303_RepeatTest
+
+      - name: Run portable tests
+        shell: bash
+        run: |
+          status=0
+          for t in build/BP303_*Test_artefacts/Release/BP303_*Test \
+                   build/BP303_*Test_artefacts/Release/BP303_*Test.exe; do
+            [ -f "$t" ] || continue
+            echo "--- $(basename "$t")"
+            "$t" || { echo "FAIL $t"; status=1; }
+          done
+          exit $status
+
+      # ditto rather than zip: it keeps the bundle's symlinks and exec bits, which
+      # a plain zip (and upload-artifact's own zipping) would flatten into an app
+      # that will not launch.
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cd build/BP303_artefacts/Release/Standalone
+          ditto -c -k --sequesterRsrc --keepParent BP303.app BP303-macOS.zip
+          lipo -archs BP303.app/Contents/MacOS/BP303
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cd build/BP303_artefacts/Release/Standalone
+          Compress-Archive -Path BP303.exe -DestinationPath BP303-Windows.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BP303-${{ matrix.name }}
+          path: build/BP303_artefacts/Release/Standalone/BP303-*.zip
+          if-no-files-found: error
+
+  release:
+    name: Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/*.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "BP303 $TAG" \
+            --notes "Standalone builds for macOS (universal) and Windows.
+
+          Neither build is code-signed. On macOS, right-click the app and choose
+          Open the first time. On Windows, SmartScreen will warn once — choose
+          More info, then Run anyway.
+
+          Windows audio runs on WASAPI: open the audio settings and pick exclusive
+          mode with a small buffer if you are playing it from a MIDI controller."

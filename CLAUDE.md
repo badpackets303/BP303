@@ -1,7 +1,8 @@
 # BP303
 
-A TB-303 style bass voice and a five-voice drum machine in one Audio Unit, built
-with JUCE. macOS only. Developed and tested as an AU in **Logic Pro**.
+A TB-303 style bass voice and a five-voice drum machine in one instrument, built
+with JUCE. Developed and tested as an AU in **Logic Pro** on macOS; also shipped
+as a standalone app for macOS and Windows.
 
 ## Build
 
@@ -19,6 +20,18 @@ cmake --build build --target BP303_AU -j8
 The AU installs itself to `~/Library/Audio/Plug-Ins/Components/` as a post-build
 step, so a successful build is already loadable in Logic. `BP303_Standalone`
 builds an app instead.
+
+Mac builds are universal (arm64 + x86_64) by default, which roughly doubles the
+link. Pass `-DCMAKE_OSX_ARCHITECTURES=arm64` when iterating.
+
+**Windows is built only by CI** (`.github/workflows/build.yml`) — there is no
+Windows machine in the loop, so anything that has to work there has to be
+reasoned about rather than tried. The rules that keeps: no `M_PI` (MSVC hides it
+behind `_USE_MATH_DEFINES` — spell pi out, as the DSP headers do), no POSIX
+headers, no hardcoded font names or paths, and anything Objective-C++ stays
+behind `BP303_HAS_NATIVE_WINDOW` with an inline no-op fallback the way
+`HostWindowCentre.h` does it. JUCE drops the AU format by itself off macOS, so
+`FORMATS AU Standalone` is already correct for both.
 
 ## Tests
 
@@ -41,6 +54,11 @@ clang++ -std=c++17 -O2 Tools/drum_test.cpp -o /tmp/drum_test && /tmp/drum_test
 Tests print a trailing `OK` / `ALL PASS` line and set the exit code. Some also
 write PNG or WAV output into the working directory for eyeballing; that output is
 gitignored.
+
+CI runs only the seven JUCE-free targets — `WaveTest`, `DistTest`, `MasterTest`,
+`DynFiltTest`, `SpaceTest`, `SongTest`, `RepeatTest` — on both platforms, because
+a failure in those is a real portability bug rather than a headless-runner
+artefact. The rest are a local macOS run, so they are still on you.
 
 `BP303_Snapshot` and `BP303_FxTabSnapshot` render the editor to PNG — the way to
 check UI work without opening a host. `BP303_PerfBench` measures repaint cost.

@@ -5,6 +5,22 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
 
+# Both Mac architectures, so a released standalone runs on Intel as well as
+# Apple Silicon. Roughly doubles the build, so override it while developing:
+# -DCMAKE_OSX_ARCHITECTURES=arm64. project() has already put an empty entry in
+# the cache by this point, so a plain set() here would be ignored — only fill it
+# in when nothing was actually asked for.
+if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES)
+    set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Mac architectures to build" FORCE)
+endif()
+
+# Static CRT, so the Windows standalone is one self-contained .exe. Someone
+# unzipping a demo should not first have to go and find a Visual C++
+# redistributable, which is what the default dynamic runtime would ask of them.
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 include(FetchContent)
 FetchContent_Declare(JUCE
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
@@ -163,6 +179,13 @@ juce_add_console_app(BP303_WaveTest PRODUCT_NAME "BP303_WaveTest")
 target_sources(BP303_WaveTest PRIVATE
     Tools/wave_test.cpp)
 target_link_libraries(BP303_WaveTest PRIVATE
+    juce::juce_recommended_config_flags)
+
+# Headless, JUCE-free test for a pattern landing back on the note it is playing
+juce_add_console_app(BP303_RepeatTest PRODUCT_NAME "BP303_RepeatTest")
+target_sources(BP303_RepeatTest PRIVATE
+    Tools/repeat_test.cpp)
+target_link_libraries(BP303_RepeatTest PRIVATE
     juce::juce_recommended_config_flags)
 
 # Headless, JUCE-free test for the selectable per-line distortion

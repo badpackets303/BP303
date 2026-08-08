@@ -29,6 +29,11 @@ namespace
     constexpr int    note = 45;      // A2, 110 Hz
     constexpr double freq = 110.0;
 
+    // Spelled out rather than M_PI, which MSVC only defines behind
+    // _USE_MATH_DEFINES — the DSP headers do the same, so the Windows build
+    // doesn't hinge on it.
+    constexpr double pi = 3.14159265358979323846;
+
     // Render one steady note with the filter wide open and no envelope movement,
     // so the output is the raw oscillator through a barely-doing-anything ladder.
     std::vector<float> render (Synth303::Wave wave, int numSamples)
@@ -49,7 +54,7 @@ namespace
     // is set to a whole number of cycles of the fundamental.
     double harmonic (const std::vector<float>& x, int offset, int count, int which)
     {
-        const double w = 2.0 * M_PI * freq * (double) which / sr;
+        const double w = 2.0 * pi * freq * (double) which / sr;
         double re = 0.0, im = 0.0;
         for (int i = 0; i < count; ++i)
         {
@@ -142,7 +147,7 @@ int main()
     for (int i = 0; i < count; ++i)
     {
         // 2.5x the fundamental: a real pulse has nothing there at all.
-        const double w = 2.0 * M_PI * freq * 2.5 / sr;
+        const double w = 2.0 * pi * freq * 2.5 / sr;
         inharmonic += pulse[(size_t) (offset + i)] * std::cos (w * i);
     }
     inharmonic = 2.0 * std::abs (inharmonic) / count;

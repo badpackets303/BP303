@@ -1,11 +1,31 @@
 # BP303
 
-A TB-303 style bass synthesiser and drum machine in one Audio Unit, built with
+A TB-303 style bass synthesiser and drum machine in one instrument, built with
 [JUCE](https://juce.com). Monophonic acid bass line with the classic accent and
 slide behaviour, a five-voice drum machine, a step sequencer for each, and a song
 arranger to chain patterns together.
 
-Developed and tested as an AU in Logic Pro on macOS.
+Runs as a standalone app on **macOS and Windows**, and as an **Audio Unit** on
+macOS. The AU is what it was developed and tested against, in Logic Pro.
+
+![BP303 in the Neon Slate skin](docs/neon-slate.png)
+
+## Download
+
+Grab the standalone for your platform from
+[Releases](../../releases). Nothing to install — unzip and run.
+
+Neither build is code-signed, so the first launch needs one extra click:
+
+- **macOS** — right-click the app and choose *Open*, then *Open* again. Double-clicking
+  it the normal way will refuse the first time.
+- **Windows** — SmartScreen will warn once. Choose *More info*, then *Run anyway*.
+
+On Windows the audio runs on WASAPI, since the ASIO SDK can't be redistributed.
+That's fine for the sequencer, but if you're playing it live from a MIDI keyboard,
+open the audio settings and switch to exclusive mode with a small buffer.
+
+Building the AU is a separate step — see [Building](#building).
 
 ## What's in it
 
@@ -34,30 +54,44 @@ compressor, chorus and reverb.
 **Also** — five UI skins with a hue control, a metronome, MIDI drag-out of the
 current pattern, and live drum triggering from GM notes on MIDI channel 10.
 
+![BP303 in the Bad Packets skin](docs/bad-packets.png)
+
+*Bad Packets, one of the five skins. Neon Slate, above, is what a fresh install
+opens on.*
+
 ## Building
 
-Requires CMake 3.22+, a C++17 compiler, and macOS 11.0 or later. JUCE 8.0.8 is
-fetched automatically by CMake — you don't need to install it.
+Requires CMake 3.22+ and a C++17 compiler — Xcode on macOS 11.0 or later, MSVC on
+Windows. JUCE 8.0.8 is fetched automatically by CMake, so you don't need to
+install it.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 ```
 
 ```bash
-cmake --build build --target BP303_AU -j8
+cmake --build build --config Release --target BP303_Standalone
 ```
 
-The AU is copied to `~/Library/Audio/Plug-Ins/Components/` after the build.
-`BP303_Standalone` builds a standalone app instead.
+`BP303_AU` builds the Audio Unit instead, and copies it to
+`~/Library/Audio/Plug-Ins/Components/` after the build. AU is macOS-only; on
+Windows that target simply isn't generated.
+
+Mac builds are universal (arm64 + x86_64) by default, which roughly doubles the
+build time. Pass `-DCMAKE_OSX_ARCHITECTURES=arm64` while developing.
 
 The first configure clones JUCE, so it takes a few minutes and the `build/`
 directory ends up around 1 GB.
+
+Release binaries are built by [CI](.github/workflows/build.yml) on both platforms
+— pushing a `v*` tag publishes them to Releases.
 
 ## Tests
 
 The DSP and sequencer code is deliberately JUCE-free where it can be, so most of
 it is testable headlessly. Each `Tools/*_test.cpp` is a self-contained program;
-they're also wired up as CMake targets.
+they're also wired up as CMake targets. CI runs the JUCE-free subset on both
+platforms; the editor and plugin-hosting tests are run locally on macOS.
 
 ```bash
 cmake --build build -j8
