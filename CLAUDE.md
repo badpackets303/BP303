@@ -37,7 +37,7 @@ behind `BP303_HAS_NATIVE_WINDOW` with an inline no-op fallback the way
 
 Two kinds, both headless. Run both before calling anything done.
 
-**CMake targets** — 22 of them, one per `Tools/*_test.cpp` that is wired up:
+**CMake targets** — 24 of them, one per `Tools/*_test.cpp` that is wired up:
 
 ```bash
 cmake --build build -j8 && for t in build/BP303_*Test_artefacts/Release/BP303_*Test; do "$t" >/dev/null || echo "FAIL $t"; done
@@ -55,13 +55,15 @@ Tests print a trailing `OK` / `ALL PASS` line and set the exit code. Some also
 write PNG or WAV output into the working directory for eyeballing; that output is
 gitignored.
 
-CI runs only the seven JUCE-free targets — `WaveTest`, `DistTest`, `MasterTest`,
-`DynFiltTest`, `SpaceTest`, `SongTest`, `RepeatTest` — on both platforms, because
-a failure in those is a real portability bug rather than a headless-runner
-artefact. The rest are a local macOS run, so they are still on you.
+CI runs only the nine JUCE-free targets — `WaveTest`, `DistTest`, `MasterTest`,
+`DynFiltTest`, `SpaceTest`, `SongTest`, `RepeatTest`, `AttackTest`,
+`DrumDecayTest` — on both platforms, because a failure in those is a real
+portability bug rather than a headless-runner artefact. The rest are a local
+macOS run, so they are still on you.
 
-`BP303_Snapshot` and `BP303_FxTabSnapshot` render the editor to PNG — the way to
-check UI work without opening a host. `BP303_PerfBench` measures repaint cost.
+`BP303_Snapshot`, `BP303_FxTabSnapshot` and `BP303_DrumTabSnapshot` render the
+editor to PNG — the way to check UI work without opening a host.
+`BP303_PerfBench` measures repaint cost.
 
 ## Layout
 

@@ -36,9 +36,18 @@ public:
 
     // Per-voice tune multipliers (1.0 = original pitch). The two hats share one
     // metal oscillator bank, so a single hatTuneAmt moves both.
+    // The three decay multipliers scale each voice's own per-kit decay rather
+    // than setting an absolute time the way BD DECAY does. Two reasons: the
+    // snare has *two* decays (tone and noise) at different lengths, which one
+    // absolute number cannot express without flattening their ratio; and the
+    // hats are where the kits differ most — 28 ms of closed hat on a 909
+    // against 45 ms on a 606 — so an absolute time would make switching kits
+    // stop changing the envelope at all. 1.0 is the kit as it was.
     void setParams (Kit k, float bdTuneAmt, float sdTuneAmt, float cpTuneAmt,
                     float hatTuneAmt, float bdDecaySec,
-                    const float* laneLevels, float volDb)
+                    const float* laneLevels, float volDb,
+                    float sdDecayMul = 1.0f, float chDecayMul = 1.0f,
+                    float ohDecayMul = 1.0f)
     {
         kit = k;
         bdTune = bdTuneAmt;
@@ -46,6 +55,9 @@ public:
         cpTune = cpTuneAmt;
         hatTune = hatTuneAmt;
         bdDecay = bdDecaySec;
+        sdDecayScale = sdDecayMul;
+        chDecayScale = chDecayMul;
+        ohDecayScale = ohDecayMul;
         for (int i = 0; i < numVoices; ++i)
             levels[i] = laneLevels[i];
         masterGain = std::pow (10.0f, volDb / 20.0f);
@@ -81,8 +93,8 @@ public:
                 sdNoiseAmp = acc;
                 sdPhase1 = sdPhase2 = 0.0f;
                 sdKit = kit;
-                sdToneCoef  = decayCoef (sel3 (kit, 0.13f, 0.10f, 0.09f));
-                sdNoiseCoef = decayCoef (sel3 (kit, 0.20f, 0.16f, 0.12f));
+                sdToneCoef  = decayCoef (sel3 (kit, 0.13f, 0.10f, 0.09f) * sdDecayScale);
+                sdNoiseCoef = decayCoef (sel3 (kit, 0.20f, 0.16f, 0.12f) * sdDecayScale);
                 break;
 
             case CP:
@@ -94,14 +106,14 @@ public:
             case CH:
                 chAmp = acc;
                 chKit = kit;
-                chCoef = decayCoef (sel3 (kit, 0.045f, 0.045f, 0.028f));
+                chCoef = decayCoef (sel3 (kit, 0.045f, 0.045f, 0.028f) * chDecayScale);
                 ohAmp = 0.0f;          // closed hat chokes the open hat
                 break;
 
             case OH:
                 ohAmp = acc;
                 ohKit = kit;
-                ohCoef = decayCoef (sel3 (kit, 0.40f, 0.30f, 0.18f));
+                ohCoef = decayCoef (sel3 (kit, 0.40f, 0.30f, 0.18f) * ohDecayScale);
                 break;
         }
     }
@@ -255,6 +267,7 @@ private:
 
     Kit   kit = Kit::K808;
     float bdTune = 1.0f, bdDecay = 0.5f;
+    float sdDecayScale = 1.0f, chDecayScale = 1.0f, ohDecayScale = 1.0f;
     float sdTune = 1.0f, cpTune = 1.0f, hatTune = 1.0f;
     float levels[numVoices] = { 0.9f, 0.8f, 0.7f, 0.6f, 0.6f };
     float masterGain = 1.0f;

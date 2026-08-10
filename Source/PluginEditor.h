@@ -529,8 +529,14 @@ public:
     // can render the bar in a known state.
     bool tabEnabled (int i) const;
 
+    // Which panel this is. The DRUMS panel is an FxSection too, so the tools
+    // that walk the tree for "the FX sections" need a way to say which they mean.
+    const juce::String& sectionTitle() const { return title; }
+
 private:
     juce::Rectangle<int> tabBarArea() const;
+    // Shared by paint and hit-testing so the two can never drift apart.
+    float tabSegmentWidth() const;
     void showTab (int i);
 
     BP303AudioProcessor& proc;
@@ -545,6 +551,11 @@ private:
     std::vector<std::unique_ptr<juce::ParameterAttachment>> enableWatchers;
 
     static constexpr int titleH = 18, tabH = 18;
+    // Tabs divide the bar evenly, but only up to a cap. Without one the DRUMS
+    // panel — three tabs across the full width of the window — would give each a
+    // 480px slab with a word lost in the middle, sitting next to FX panels whose
+    // tabs are a third of that. The cap keeps every tab bar reading at one scale.
+    static constexpr int maxTabW = 150;
 };
 
 // Everything the editor draws lives inside one fixed-size component that the
@@ -696,7 +707,7 @@ private:
 
     // synth row
     Switch wave;
-    Knob tuning, cutoff, resonance, envmod, decay, accent, volume, vibSpeed, vibDepth;
+    Knob tuning, cutoff, resonance, envmod, attack, decay, accent, volume, vibSpeed, vibDepth;
 
     // performance
     Switch playMode;
@@ -755,9 +766,25 @@ private:
     Knob bassReverbSize, bassReverbDamp, bassReverbMix;
 
     // drums
+    // KIT stays outside the tabs — it applies to every page — so it is a child
+    // of the editor drawn over the section's content area, not of a page. It is
+    // a 3-segment switch, so it gets more width than a knob column.
+    static constexpr int drumKitColumnW = 96;
     Switch kit;
     Knob bdTune, sdTune, cpTune, hatTune, bdDecay, drumVol;
+    Knob sdDecay, chDecay, ohDecay;
     Knob laneKnobs[5];
+
+    // Fourteen drum controls will not read at 90px a column across one strip, so
+    // the panel borrows the FX sections' tab bar. Tabbed by function rather than
+    // by voice: setting a balance means comparing levels across voices, and
+    // per-voice pages would turn that into five tab switches. No enable ids —
+    // a drum page has nothing to switch on — which FxSection handles by simply
+    // not drawing any lamps.
+    FxSection drums { proc, "DRUMS",
+                      juce::StringArray { "MIX", "TUNE", "DECAY" },
+                      juce::StringArray {} };
+    FxPage drumMixPage, drumTunePage, drumDecayPage;
 
     // --- drum fx (tabbed) ---
     FxSection drumFx { proc, "DRUM FX",
