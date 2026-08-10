@@ -36,14 +36,18 @@ public:
         phase = 0.0;
         vibPhase = 0.0;
         env = accEnv = accEnvSmoothed = amp = 0.0f;
+        envRising = false;
         gate = false;
         heldNotes.clear();
         currentFreq = targetFreq = midiToFreq (45.0f);
     }
 
+    // attackMs defaults to zero — the 303 has no attack stage at all, and that
+    // instant snap is what every existing caller (and every saved project) is
+    // asking for. Only the plugin passes anything else.
     void setParams (Wave w, float tuningSemis, float cutoffHz, float res,
                     float envModAmt, float decayMs, float accentAmt, float volDb,
-                    float vibSpeedHz, float vibDepthSemis)
+                    float vibSpeedHz, float vibDepthSemis, float attackMs = 0.0f)
     {
         wave = w;
         tuning = tuningSemis;
@@ -51,6 +55,7 @@ public:
         resonance = res;
         envMod = envModAmt;
         decaySeconds = decayMs * 0.001f;
+        attackSeconds = attackMs * 0.001f;
         accent = accentAmt;
         gain = std::pow (10.0f, volDb / 20.0f);
         vibSpeed = vibSpeedHz;
@@ -76,8 +81,29 @@ public:
             // note opens up less — quieter and duller together, the way a
             // lightly played note behaves. Level is applied separately below,
             // since env only drives the filter here.
-            env = soft ? softEnv : 1.0f;
+            envPeak = soft ? softEnv : 1.0f;
             noteLevel = soft ? softLevel : 1.0f;
+
+            // ATTACK is an addition, not a 303 behaviour: the original jumps the
+            // filter envelope straight to the top. Accents keep that jump — the
+            // snap is the whole point of an accent, and sweeping into one reads
+            // as a mistake rather than as emphasis. A soft step rises from zero
+            // to its own lower peak, so it stays the lighter-struck note.
+            if (attackSeconds > 0.0f && ! accented)
+            {
+                env = 0.0f;
+                envRising = true;
+                // Linear rather than the one-pole used elsewhere in this file: a
+                // one-pole only reaches 63% in its time constant, so a dial set
+                // to 100 ms would take most of a second to actually open. A ramp
+                // makes the number on the knob the time you hear.
+                envRise = envPeak / std::max (1.0f, attackSeconds * (float) sampleRate);
+            }
+            else
+            {
+                env = envPeak;
+                envRising = false;
+            }
             // Restart the vibrato with each new note. 303 notes are short (often
             // less than one LFO cycle), so a free-running LFO would give each note
             // an arbitrary slice of the waveform — audible as random detuning
@@ -151,8 +177,22 @@ private:
         // Pitch glide (slide)
         currentFreq += (targetFreq - currentFreq) * glideCoef;
 
-        // Envelopes
-        env *= decayCoef;
+        // Envelopes. The filter envelope only starts falling once it has run its
+        // attack ramp, so ATTACK and DECAY are the two stages of one AD rather
+        // than two things fighting over the same value.
+        if (envRising)
+        {
+            env += envRise;
+            if (env >= envPeak)
+            {
+                env = envPeak;
+                envRising = false;
+            }
+        }
+        else
+        {
+            env *= decayCoef;
+        }
         accEnv *= accDecayCoef;
         // The accent "wow" comes from the accent envelope being smeared in
         // time before it hits the filter.
@@ -264,7 +304,7 @@ private:
     float cutoff = 500.0f;
     float resonance = 0.5f;
     float envMod = 0.5f;
-    float decaySeconds = 0.3f;
+    float decaySeconds = 0.3f, attackSeconds = 0.0f;
     float accent = 0.5f;
     float gain = 1.0f;
 
@@ -285,6 +325,8 @@ private:
     float glideCoef = 0.001f, attackCoef = 0.01f, releaseCoef = 0.005f, accSmoothCoef = 0.002f;
     float decayCoef = 0.9999f, accDecayCoef = 0.9999f;
     float env = 0.0f, accEnv = 0.0f, accEnvSmoothed = 0.0f, amp = 0.0f;
+    float envPeak = 1.0f, envRise = 0.0f;   // filter-envelope attack ramp
+    bool  envRising = false;
     float s1 = 0, s2 = 0, s3 = 0, s4 = 0;
     bool  gate = false;
 

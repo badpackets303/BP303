@@ -696,7 +696,7 @@ private:
 
     // synth row
     Switch wave;
-    Knob tuning, cutoff, resonance, envmod, decay, accent, volume, vibSpeed, vibDepth;
+    Knob tuning, cutoff, resonance, envmod, attack, decay, accent, volume, vibSpeed, vibDepth;
 
     // performance
     Switch playMode;

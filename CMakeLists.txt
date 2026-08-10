@@ -181,6 +181,13 @@ target_sources(BP303_WaveTest PRIVATE
 target_link_libraries(BP303_WaveTest PRIVATE
     juce::juce_recommended_config_flags)
 
+# Headless, JUCE-free test for the filter envelope's ATTACK stage
+juce_add_console_app(BP303_AttackTest PRODUCT_NAME "BP303_AttackTest")
+target_sources(BP303_AttackTest PRIVATE
+    Tools/attack_test.cpp)
+target_link_libraries(BP303_AttackTest PRIVATE
+    juce::juce_recommended_config_flags)
+
 # Headless, JUCE-free test for a pattern landing back on the note it is playing
 juce_add_console_app(BP303_RepeatTest PRODUCT_NAME "BP303_RepeatTest")
 target_sources(BP303_RepeatTest PRIVATE

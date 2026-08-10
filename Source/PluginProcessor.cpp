@@ -350,6 +350,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout BP303AudioProcessor::createP
             NormalisableRange<float> (0.0f, 1.0f), 0.0f));
     }
 
+    // Appended rather than filed next to DECAY where it belongs on the panel:
+    // a host stores automation against the parameter's index, so inserting one
+    // in the middle would silently re-point every lane after it in projects that
+    // already exist. New parameters go on the end for the same reason enums do.
+    // 0 ms is the 303 — no attack stage — so old projects load unchanged.
+    layout.add (std::make_unique<AudioParameterFloat> (
+        ParameterID { "attack", 1 }, "Attack",
+        NormalisableRange<float> (0.0f, 500.0f, 0.0f, 0.5f), 0.0f));
+
     return layout;
 }
 
@@ -875,10 +884,11 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     const float pVol    = apvts.getRawParameterValue ("volume")->load();
     const float pVibSpd = apvts.getRawParameterValue ("vibspeed")->load();
     const float pVibDep = apvts.getRawParameterValue ("vibdepth")->load();
+    const float pAttack = apvts.getRawParameterValue ("attack")->load();
 
     // both the sequencer voice and the live-monitor voice share the patch
-    synth.setParams (wave, pTuning, pCutoff, pRes, pEnvMod, pDecay, pAccent, pVol, pVibSpd, pVibDep);
-    monitorSynth.setParams (wave, pTuning, pCutoff, pRes, pEnvMod, pDecay, pAccent, pVol, pVibSpd, pVibDep);
+    synth.setParams (wave, pTuning, pCutoff, pRes, pEnvMod, pDecay, pAccent, pVol, pVibSpd, pVibDep, pAttack);
+    monitorSynth.setParams (wave, pTuning, pCutoff, pRes, pEnvMod, pDecay, pAccent, pVol, pVibSpd, pVibDep, pAttack);
 
     auto* left = buffer.getWritePointer (0);
     const int numSamples = buffer.getNumSamples();

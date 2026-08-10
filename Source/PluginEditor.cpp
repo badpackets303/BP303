@@ -2969,6 +2969,7 @@ BP303AudioProcessorEditor::BP303AudioProcessorEditor (BP303AudioProcessor& p)
     cutoff.init (content, proc.apvts, "cutoff", "CUT OFF");
     resonance.init (content, proc.apvts, "resonance", "RESONANCE", ui303::HotTop);
     envmod.init (content, proc.apvts, "envmod", "ENV MOD");
+    attack.init (content, proc.apvts, "attack", "ATTACK");
     decay.init (content, proc.apvts, "decay", "DECAY");
     accent.init (content, proc.apvts, "accent", "ACCENT");
     volume.init (content, proc.apvts, "volume", "VOLUME");
@@ -4050,10 +4051,10 @@ void BP303AudioProcessorEditor::layoutContent()
 
     // --- synth row ---
     auto synthRow = area.removeFromTop (120).reduced (10, 16);
-    const int knobW = synthRow.getWidth() / 10;
+    const int knobW = synthRow.getWidth() / 11;
     wave.setBounds (synthRow.removeFromLeft (knobW).reduced (6, 14));
-    for (auto* k : { &tuning, &cutoff, &resonance, &envmod, &decay, &accent, &volume,
-                     &vibSpeed, &vibDepth })
+    for (auto* k : { &tuning, &cutoff, &resonance, &envmod, &attack, &decay, &accent,
+                     &volume, &vibSpeed, &vibDepth })
         k->setBounds (synthRow.removeFromLeft (knobW).reduced (4, 0));
     area.removeFromTop (6);
 
