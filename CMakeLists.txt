@@ -97,6 +97,21 @@ target_link_libraries(BP303_FxTabSnapshot PRIVATE
     juce::juce_dsp
     juce::juce_recommended_config_flags)
 
+# Renders one snapshot per DRUMS tab, for checking MIX / TUNE / DECAY
+juce_add_console_app(BP303_DrumTabSnapshot PRODUCT_NAME "BP303_DrumTabSnapshot")
+target_sources(BP303_DrumTabSnapshot PRIVATE
+    Tools/drumtab_snapshot.cpp
+    Source/PluginProcessor.cpp
+    Source/PluginEditor.cpp)
+target_compile_definitions(BP303_DrumTabSnapshot PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JucePlugin_Name="BP303")
+target_link_libraries(BP303_DrumTabSnapshot PRIVATE
+    juce::juce_audio_utils
+    juce::juce_dsp
+    juce::juce_recommended_config_flags)
+
 # Renders one knob across its whole travel, per skin, for judging anything that
 # varies along the sweep — the editor snapshots only ever show one position
 juce_add_console_app(BP303_KnobSnapshot PRODUCT_NAME "BP303_KnobSnapshot")
@@ -179,6 +194,13 @@ juce_add_console_app(BP303_WaveTest PRODUCT_NAME "BP303_WaveTest")
 target_sources(BP303_WaveTest PRIVATE
     Tools/wave_test.cpp)
 target_link_libraries(BP303_WaveTest PRIVATE
+    juce::juce_recommended_config_flags)
+
+# Headless, JUCE-free test for the per-voice snare and hat decay multipliers
+juce_add_console_app(BP303_DrumDecayTest PRODUCT_NAME "BP303_DrumDecayTest")
+target_sources(BP303_DrumDecayTest PRIVATE
+    Tools/drumdecay_test.cpp)
+target_link_libraries(BP303_DrumDecayTest PRIVATE
     juce::juce_recommended_config_flags)
 
 # Headless, JUCE-free test for the filter envelope's ATTACK stage

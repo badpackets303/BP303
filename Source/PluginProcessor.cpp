@@ -350,6 +350,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout BP303AudioProcessor::createP
             NormalisableRange<float> (0.0f, 1.0f), 0.0f));
     }
 
+    // Multipliers on each voice's own per-kit decay, so the kits keep their
+    // character — see the note on DrumMachine::setParams. Skewed so 1.0x, the
+    // stock kit, sits at the centre of the knob's travel.
+    {
+        const NormalisableRange<float> decayMul { 0.25f, 4.0f, 0.0f, 0.43f };
+        layout.add (std::make_unique<AudioParameterFloat> (
+            ParameterID { "sddecay", 1 }, "Snare Decay", decayMul, 1.0f));
+        layout.add (std::make_unique<AudioParameterFloat> (
+            ParameterID { "chdecay", 1 }, "Closed Hat Decay", decayMul, 1.0f));
+        layout.add (std::make_unique<AudioParameterFloat> (
+            ParameterID { "ohdecay", 1 }, "Open Hat Decay", decayMul, 1.0f));
+    }
+
     // Appended rather than filed next to DECAY where it belongs on the panel:
     // a host stores automation against the parameter's index, so inserting one
     // in the middle would silently re-point every lane after it in projects that
@@ -1299,7 +1312,10 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
             apvts.getRawParameterValue ("hattune")->load(),
             apvts.getRawParameterValue ("bddecay")->load(),
             laneLevels,
-            apvts.getRawParameterValue ("drumvol")->load());
+            apvts.getRawParameterValue ("drumvol")->load(),
+            apvts.getRawParameterValue ("sddecay")->load(),
+            apvts.getRawParameterValue ("chdecay")->load(),
+            apvts.getRawParameterValue ("ohdecay")->load());
 
         // Render drums into their own buffer so the drum delay applies to the
         // drum sum only, then mix into the master. Voices render mono; the second

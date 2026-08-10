@@ -877,6 +877,13 @@ juce::Rectangle<int> FxSection::tabBarArea() const
     return getLocalBounds().reduced (8, 0).withTrimmedTop (titleH).withHeight (tabH);
 }
 
+float FxSection::tabSegmentWidth() const
+{
+    const int n = juce::jmax (1, tabs.size());
+    return juce::jmin ((float) maxTabW,
+                       (float) tabBarArea().getWidth() / (float) n);
+}
+
 juce::Rectangle<int> FxSection::contentArea() const
 {
     return getLocalBounds().withTrimmedTop (titleH + tabH + 2).withTrimmedBottom (4);
@@ -906,7 +913,7 @@ void FxSection::paint (juce::Graphics& g)
         return;
 
     auto bar = tabBarArea().toFloat();
-    const float segW = bar.getWidth() / (float) n;
+    const float segW = tabSegmentWidth();
     g.setFont (juce::FontOptions (juce::jlimit (8.0f, 10.5f, segW * 0.30f),
                                   juce::Font::bold));
 
@@ -979,8 +986,9 @@ void FxSection::mouseDown (const juce::MouseEvent& e)
     if (! bar.contains (e.getPosition()))
         return;
     const int n = juce::jmax (1, tabs.size());
-    const int i = juce::jlimit (0, n - 1, (e.x - bar.getX()) * n / juce::jmax (1, bar.getWidth()));
-    showTab (i);
+    const int i = (int) ((float) (e.x - bar.getX()) / tabSegmentWidth());
+    if (juce::isPositiveAndBelow (i, n))
+        showTab (i);
 }
 
 //==============================================================================
@@ -3054,17 +3062,30 @@ BP303AudioProcessorEditor::BP303AudioProcessorEditor (BP303AudioProcessor& p)
         bassFx.addPage (*pg);
     content.addAndMakeVisible (bassFx);
 
-    kit.init (content, proc, proc.apvts, "kit", "KIT");
-    bdTune.init (content, proc.apvts, "bdtune", "BD TUNE");
-    sdTune.init (content, proc.apvts, "sdtune", "SD TUNE");
-    cpTune.init (content, proc.apvts, "cptune", "CP TUNE");
-    hatTune.init (content, proc.apvts, "hattune", "HAT TUNE");
-    bdDecay.init (content, proc.apvts, "bddecay", "BD DECAY");
-    drumVol.init (content, proc.apvts, "drumvol", "DRUM VOL");
+    // --- drums (tabbed): MIX / TUNE / DECAY -----------------------------------
     static const char* laneIds[] = { "bdlvl", "sdlvl", "cplvl", "chlvl", "ohlvl" };
     static const char* laneTexts[] = { "BD", "SD", "CP", "CH", "OH" };
     for (int i = 0; i < 5; ++i)
-        laneKnobs[i].init (content, proc.apvts, laneIds[i], laneTexts[i]);
+        laneKnobs[i].init (drumMixPage, proc.apvts, laneIds[i], laneTexts[i]);
+    drumVol.init (drumMixPage, proc.apvts, "drumvol", "DRUM VOL");
+
+    bdTune.init (drumTunePage, proc.apvts, "bdtune", "BD TUNE");
+    sdTune.init (drumTunePage, proc.apvts, "sdtune", "SD TUNE");
+    cpTune.init (drumTunePage, proc.apvts, "cptune", "CP TUNE");
+    hatTune.init (drumTunePage, proc.apvts, "hattune", "HAT TUNE");
+
+    bdDecay.init (drumDecayPage, proc.apvts, "bddecay", "BD DECAY");
+    sdDecay.init (drumDecayPage, proc.apvts, "sddecay", "SD DECAY");
+    chDecay.init (drumDecayPage, proc.apvts, "chdecay", "CH DECAY");
+    ohDecay.init (drumDecayPage, proc.apvts, "ohdecay", "OH DECAY");
+
+    for (auto* pg : { &drumMixPage, &drumTunePage, &drumDecayPage })
+        drums.addPage (*pg);
+    content.addAndMakeVisible (drums);
+
+    // Added after the section so it sits on top of it: KIT belongs to the panel
+    // rather than to any one page, and the pages leave its column clear.
+    kit.init (content, proc, proc.apvts, "kit", "KIT");
 
     // --- drum fx tabs: DIST / DELAY / FILTER / COMP / CHORUS / REVERB ---
     drumDistPage.addAndMakeVisible (drumDistOn);
@@ -3129,6 +3150,25 @@ BP303AudioProcessorEditor::BP303AudioProcessorEditor (BP303AudioProcessor& p)
     // type's own pair. The group is handed exactly two columns so its own split
     // lands on the same width, keeping all three evenly spaced whichever type is
     // showing — the same three-across layout the COMP and REVERB tabs use.
+    // Every drum page leaves the KIT column on the left clear, since KIT is drawn
+    // over the section rather than belonging to a page.
+    // Takes a vector, not an initializer_list: the list does not own its backing
+    // array, so capturing one in a lambda that outlives the call leaves every
+    // pointer dangling and the editor crashes on its first resize.
+    const auto drumPageLayout = [] (std::vector<Knob*> knobs) {
+        return [knobs = std::move (knobs)] (juce::Rectangle<int> r) {
+            r = r.reduced (6, 6);
+            r.removeFromLeft (drumKitColumnW);
+            const int w = r.getWidth() / (int) knobs.size();
+            for (auto* k : knobs)
+                k->setBounds (r.removeFromLeft (w).reduced (8, 0));
+        };
+    };
+    drumMixPage.layoutFn = drumPageLayout ({ &laneKnobs[0], &laneKnobs[1], &laneKnobs[2],
+                                             &laneKnobs[3], &laneKnobs[4], &drumVol });
+    drumTunePage.layoutFn = drumPageLayout ({ &bdTune, &sdTune, &cpTune, &hatTune });
+    drumDecayPage.layoutFn = drumPageLayout ({ &bdDecay, &sdDecay, &chDecay, &ohDecay });
+
     bassDistPage.layoutFn = [this] (juce::Rectangle<int> r) {
         r = r.reduced (6, 6);
         distOn.setBounds (r.removeFromLeft (78).reduced (0, 18));
@@ -4014,8 +4054,8 @@ void BP303AudioProcessorEditor::paintContent (juce::Graphics& g)
     panel (row2.removeFromLeft (330), "PERFORMANCE");
     area.removeFromTop (6);
 
-    // drum row: DRUMS spans the full width
-    panel (area.removeFromTop (120), "DRUMS");
+    // drum row: the DRUMS FxSection draws its own frame, like the FX panels
+    area.removeFromTop (120);
     area.removeFromTop (6);
 
     // lower region: sequencer grids on the left, then the per-line keypads, then
@@ -4083,16 +4123,13 @@ void BP303AudioProcessorEditor::layoutContent()
     drumFx.setBounds (row2);
     area.removeFromTop (6);
 
-    // --- drums row: DRUMS panel spans the full width ---
-    auto drumRow = area.removeFromTop (120).reduced (10, 16);
-    // KIT is a 3-segment switch, so give it more width than a knob column
-    kit.setBounds (drumRow.removeFromLeft (96).reduced (4, 14));
-    // per-voice tune + decay/vol globals, then the 5 lane levels
-    const int drumW = drumRow.getWidth() / 12;
-    for (auto* k : { &bdTune, &sdTune, &cpTune, &hatTune, &bdDecay, &drumVol })
-        k->setBounds (drumRow.removeFromLeft (drumW).reduced (4, 0));
-    for (auto& k : laneKnobs)
-        k.setBounds (drumRow.removeFromLeft (drumW).reduced (4, 0));
+    // --- drums row: the tabbed DRUMS section spans the full width ---
+    drums.setBounds (area.removeFromTop (120));
+    // KIT sits in the column every page leaves clear. Placed after the section is
+    // sized, since it is measured from the section's own content area.
+    kit.setBounds (drums.contentArea().reduced (6, 6)
+                       .removeFromLeft (drumKitColumnW).reduced (4, 8)
+                   + drums.getPosition());
     area.removeFromTop (6);
 
     // --- lower region: grids, then the keypads, then the song arrangement ---

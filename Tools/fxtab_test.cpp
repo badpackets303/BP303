@@ -25,8 +25,10 @@ namespace
     {
         for (auto* child : c.getChildren())
         {
+            // DRUMS is an FxSection as well now; this tool means the FX ones.
             if (auto* fx = dynamic_cast<FxSection*> (child))
-                out.push_back (fx);
+                if (fx->sectionTitle().contains ("FX"))
+                    out.push_back (fx);
             collect (*child, out);
         }
     }
