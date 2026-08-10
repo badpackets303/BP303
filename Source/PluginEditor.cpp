@@ -3452,6 +3452,25 @@ BP303AudioProcessorEditor::BP303AudioProcessorEditor (BP303AudioProcessor& p)
         }
     };
 
+    content.addAndMakeVisible (songDragMidi);
+    songDragMidi.onDragOut = [this]
+    {
+        if (proc.song.getCount() <= 0)
+            return;
+
+        const auto& p = ui303::palette (proc.uiSkin.load());
+        juce::Image chip (juce::Image::ARGB, 62, 22, true);
+        {
+            juce::Graphics g (chip);
+            g.setColour (p.orange);
+            g.fillRoundedRectangle (chip.getBounds().toFloat().reduced (1.0f), 4.0f);
+            g.setColour (juce::Colour (0xff2a2a26));
+            g.setFont (juce::FontOptions (11.0f, juce::Font::bold));
+            g.drawText ("SONG", chip.getBounds(), juce::Justification::centred);
+        }
+        startDragging (songDragDescription, &songDragMidi, juce::ScaledImage (chip), true);
+    };
+
     content.addAndMakeVisible (songSave);
     songSave.onClick = [this]
     {
@@ -3731,12 +3750,16 @@ void BP303AudioProcessorEditor::startHelp()
         "silent until one does.\n\n"
         "Click a row's number to move the playhead to it." });
 
-    steps.push_back ({ around ({ &songLibrary, &songSave }), "Saving songs",
+    steps.push_back ({ around ({ &songLibrary, &songDragMidi, &songSave }), "Saving songs",
         "SAVE writes a .bp303song file to your Music folder, under BP303/Songs. "
         "The dropdown lists what's in there.\n\n"
         "A song file carries copies of every pattern it uses, so it plays correctly "
         "even in a project whose banks hold something else. Loading a song will "
-        "overwrite those pattern slots." });
+        "overwrite those pattern slots.\n\n"
+        "Drag MIDI out to your track to get the whole arrangement as one region - "
+        "repeats expanded, holds resolved, mutes applied. Bass and drums come out "
+        "together, so dropping it back on a BP303 plays the song complete. Drag a "
+        "pattern key instead when you only want one line." });
 
     help.setSteps (std::move (steps));
     help.start();
@@ -3786,52 +3809,64 @@ void BP303AudioProcessorEditor::updateSongInfo()
                       juce::dontSendNotification);
 }
 
-juce::File BP303AudioProcessorEditor::writeSlotMidiFile (bool bass, int slot)
+// The exporters read a sequencer, so a stored slot is loaded into a scratch one
+// rather than duplicating the timing rules for patterns that aren't playing.
+// Shared by the single-pattern drag and the song drag, so the two can never
+// disagree about how a pattern is voiced.
+juce::MidiMessageSequence BP303AudioProcessorEditor::bassSlotSequence (int slot, int& lengthSteps) const
 {
     const float shuffle = proc.apvts.getRawParameterValue ("shuffle")->load();
+    const auto pat = proc.snapshotBassPattern (slot);
 
-    // The exporters read a sequencer, so the slot is loaded into a scratch one
-    // rather than duplicating the timing rules for stored patterns.
+    Sequencer303 seq;
+    for (int i = 0; i < Sequencer303::maxSteps; ++i)
+    {
+        Sequencer303::storePitch (seq.steps[i], pat.bass[i].pitch);
+        seq.steps[i].gate.store (pat.bass[i].gate);
+        seq.steps[i].dyn.store (dyn303::clampDyn (pat.bass[i].dyn));
+        seq.steps[i].slide.store (pat.bass[i].slide);
+        seq.steps[i].hold.store (juce::jlimit (1, Sequencer303::maxSteps, pat.bass[i].hold));
+    }
+    lengthSteps = juce::jlimit (1, Sequencer303::maxSteps, pat.length);
+    seq.length.store (lengthSteps);
+
+    return bp303::bassSequence (seq, shuffle);
+}
+
+// A drum pattern carries no length of its own — it runs to whatever the bass
+// line's length is, so the caller passes the length it should fill.
+juce::MidiMessageSequence BP303AudioProcessorEditor::drumSlotSequence (int slot, int lengthSteps) const
+{
+    const float shuffle = proc.apvts.getRawParameterValue ("shuffle")->load();
+    const auto pat = proc.snapshotDrumPattern (slot);
+
+    DrumSequencer drums;
+    for (int lane = 0; lane < DrumSequencer::numLanes; ++lane)
+    {
+        drums.stepMask[lane].store (pat.drumSteps[lane]);
+        drums.accentMask[lane].store (pat.drumAccents[lane]);
+        drums.softMask[lane].store (pat.drumSofts[lane]);
+    }
+    drums.normalise();
+
+    return bp303::drumSequence (drums, lengthSteps, shuffle);
+}
+
+juce::File BP303AudioProcessorEditor::writeSlotMidiFile (bool bass, int slot)
+{
     std::vector<juce::MidiMessageSequence> tracks;
     juce::String name;
     int len = 0;
 
     if (bass)
     {
-        const auto pat = proc.snapshotBassPattern (slot);
-
-        Sequencer303 seq;
-        for (int i = 0; i < Sequencer303::maxSteps; ++i)
-        {
-            Sequencer303::storePitch (seq.steps[i], pat.bass[i].pitch);
-            seq.steps[i].gate.store (pat.bass[i].gate);
-            seq.steps[i].dyn.store (dyn303::clampDyn (pat.bass[i].dyn));
-            seq.steps[i].slide.store (pat.bass[i].slide);
-            seq.steps[i].hold.store (juce::jlimit (1, Sequencer303::maxSteps, pat.bass[i].hold));
-        }
-        len = juce::jlimit (1, Sequencer303::maxSteps, pat.length);
-        seq.length.store (len);
-
-        tracks.push_back (bp303::bassSequence (seq, shuffle));
+        tracks.push_back (bassSlotSequence (slot, len));
         name = "BP303 Bass " + SongList::slotName (slot);
     }
     else
     {
-        const auto pat = proc.snapshotDrumPattern (slot);
-
-        DrumSequencer drums;
-        for (int lane = 0; lane < DrumSequencer::numLanes; ++lane)
-        {
-            drums.stepMask[lane].store (pat.drumSteps[lane]);
-            drums.accentMask[lane].store (pat.drumAccents[lane]);
-            drums.softMask[lane].store (pat.drumSofts[lane]);
-        }
-        drums.normalise();
-        // A drum pattern carries no length of its own — it runs to whatever the
-        // bass line's length is, so the live length is what the region gets.
         len = juce::jlimit (1, Sequencer303::maxSteps, proc.sequencer.length.load());
-
-        tracks.push_back (bp303::drumSequence (drums, len, shuffle));
+        tracks.push_back (drumSlotSequence (slot, len));
         name = "BP303 Drums " + SongList::slotName (slot);
     }
 
@@ -3842,6 +3877,82 @@ juce::File BP303AudioProcessorEditor::writeSlotMidiFile (bool bass, int slot)
 
     const auto file = dir.getChildFile (name + ".mid");
     if (! bp303::writeMidiFile (file, tracks, len))
+        return {};
+
+    return file;
+}
+
+// The whole arrangement as one region: every row's patterns stamped down the
+// timeline at the tick that row starts on, repeats expanded, holds resolved and
+// mutes honoured — the same walk SongPlayer does, but over ticks rather than
+// transport phase.
+//
+// Bass and drums go into a single track rather than one each. The file is meant
+// to be dropped back onto a BP303, which reads bass on channel 1 and drums on
+// channel 10, so one region plays the arrangement complete. Dragging the pattern
+// keys still gives a line at a time when that is what you want.
+juce::File BP303AudioProcessorEditor::writeSongMidiFile()
+{
+    const int rows = proc.song.getCount();
+    if (rows <= 0)
+        return {};
+
+    juce::MidiMessageSequence merged;
+    double tick = 0.0;
+    int totalSteps = 0;
+
+    // A slot still reading `hold` means no row up to this point has named that
+    // line. There is nothing to carry on from, so the line stays silent — the
+    // same call the processor makes, and the reason a song plays the same way
+    // twice regardless of what was loaded when you pressed play.
+    int heldBass = SongPlayer::hold, heldDrum = SongPlayer::hold;
+
+    for (int row = 0; row < rows; ++row)
+    {
+        const auto step = proc.song.getStep (row);
+
+        if (step.bassSlot != SongPlayer::hold) heldBass = step.bassSlot;
+        if (step.drumSlot != SongPlayer::hold) heldDrum = step.drumSlot;
+
+        // The bass pattern owns the loop length, so it sets the row's length even
+        // when the bass itself is muted. With no bass named yet there is nothing
+        // to ask, so the live sequencer length stands in — as it does in locate().
+        int lengthSteps = juce::jlimit (1, Sequencer303::maxSteps,
+                                        proc.sequencer.length.load());
+        juce::MidiMessageSequence bassSeq;
+        if (heldBass != SongPlayer::hold)
+            bassSeq = bassSlotSequence (heldBass, lengthSteps);
+
+        juce::MidiMessageSequence drumSeq;
+        if (heldDrum != SongPlayer::hold && ! step.drumMute)
+            drumSeq = drumSlotSequence (heldDrum, lengthSteps);
+
+        const int repeats = juce::jmax (1, step.repeats);
+        for (int r = 0; r < repeats; ++r)
+        {
+            if (heldBass != SongPlayer::hold && ! step.bassMute)
+                bp303::appendAt (merged, bassSeq, tick);
+            if (heldDrum != SongPlayer::hold && ! step.drumMute)
+                bp303::appendAt (merged, drumSeq, tick);
+
+            tick += (double) lengthSteps * bp303::ticksPer16th;
+            totalSteps += lengthSteps;
+        }
+    }
+
+    merged.updateMatchedPairs();
+    merged.sort();
+
+    auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                   .getChildFile ("BP303");
+    dir.createDirectory();
+
+    auto name = proc.getSongName();
+    if (name.isEmpty())
+        name = "Song";
+
+    const auto file = dir.getChildFile ("BP303 " + name + ".mid");
+    if (! bp303::writeMidiFile (file, { merged }, totalSteps))
         return {};
 
     return file;
@@ -3860,14 +3971,23 @@ bool BP303AudioProcessorEditor::shouldDropFilesWhenDraggedExternally (
     if (getScreenBounds().contains (pointerPosition()))
         return false;
 
-    // Only a pattern-key drag has anything to hand over; anything else that
-    // leaves the window is left as a plain internal drag that goes nowhere.
-    bool bass = true;
-    int slot = 0;
-    if (! SongList::parseDrag (details.description, bass, slot))
-        return false;
+    // A song drag hands over the whole arrangement; a pattern-key drag hands over
+    // one slot. Anything else that leaves the window is left as a plain internal
+    // drag that goes nowhere.
+    juce::File file;
+    if (details.description.toString() == songDragDescription)
+    {
+        file = writeSongMidiFile();
+    }
+    else
+    {
+        bool bass = true;
+        int slot = 0;
+        if (! SongList::parseDrag (details.description, bass, slot))
+            return false;
 
-    const auto file = writeSlotMidiFile (bass, slot);
+        file = writeSlotMidiFile (bass, slot);
+    }
     if (! file.existsAsFile())
         return false;
 
@@ -4156,7 +4276,9 @@ void BP303AudioProcessorEditor::layoutContent()
         songInfo.setBounds (songArea.removeFromBottom (15));
 
         auto lib = songArea.removeFromBottom (21);
-        songSave.setBounds (lib.removeFromRight (56).reduced (1, 1));
+        songSave.setBounds (lib.removeFromRight (52).reduced (1, 1));
+        lib.removeFromRight (3);
+        songDragMidi.setBounds (lib.removeFromRight (46).reduced (1, 1));
         lib.removeFromRight (4);
         songLibrary.setBounds (lib.reduced (1, 1));
         songArea.removeFromBottom (4);

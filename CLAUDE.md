@@ -37,7 +37,7 @@ behind `BP303_HAS_NATIVE_WINDOW` with an inline no-op fallback the way
 
 Two kinds, both headless. Run both before calling anything done.
 
-**CMake targets** — 24 of them, one per `Tools/*_test.cpp` that is wired up:
+**CMake targets** — 25 of them, one per `Tools/*_test.cpp` that is wired up:
 
 ```bash
 cmake --build build -j8 && for t in build/BP303_*Test_artefacts/Release/BP303_*Test; do "$t" >/dev/null || echo "FAIL $t"; done

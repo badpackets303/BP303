@@ -851,7 +851,13 @@ private:
 
     // Drag-to-host MIDI export: writes one pattern slot to a temp .mid file and
     // returns it, or a non-existent File if it couldn't be written.
+    // Distinct from SongList's "BP303PAT:" keys, so the two drags never collide.
+    static constexpr const char* songDragDescription = "BP303SONG";
+
     juce::File writeSlotMidiFile (bool bass, int slot);
+    juce::File writeSongMidiFile();
+    juce::MidiMessageSequence bassSlotSequence (int slot, int& lengthSteps) const;
+    juce::MidiMessageSequence drumSlotSequence (int slot, int lengthSteps) const;
 
     // song / arrangement
     SongTransport songTransport { proc };
@@ -863,6 +869,37 @@ private:
     // song library (files under ~/Music/BP303/Songs)
     LibraryBox songLibrary;
     juce::TextButton songSave { "SAVE" };
+
+    // Drag the whole arrangement out as one MIDI region. A TextButton cannot
+    // start a drag on its own, so this is a button that also reports a drag —
+    // pressed like a button, dragged like a pattern key.
+    class SongDragButton : public juce::TextButton
+    {
+    public:
+        SongDragButton() : juce::TextButton ("MIDI") {}
+        std::function<void()> onDragOut;
+        void mouseDrag (const juce::MouseEvent& e) override
+        {
+            // A few pixels of slop, so a slightly unsteady click is still a click.
+            if (! dragging && e.getDistanceFromDragStart() > 4 && onDragOut)
+            {
+                dragging = true;
+                onDragOut();
+            }
+            juce::TextButton::mouseDrag (e);
+        }
+        void mouseUp (const juce::MouseEvent& e) override
+        {
+            dragging = false;
+            // Always passed on: Button tracks its own pressed state here, and
+            // swallowing it leaves the button stuck looking held down after a
+            // drag. Nothing is bound to the click, so letting it through is free.
+            juce::TextButton::mouseUp (e);
+        }
+    private:
+        bool dragging = false;
+    };
+    SongDragButton songDragMidi;
     juce::Array<juce::File> libraryFiles;
     std::unique_ptr<juce::FileChooser> chooser;
 

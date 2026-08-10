@@ -196,6 +196,21 @@ target_sources(BP303_WaveTest PRIVATE
 target_link_libraries(BP303_WaveTest PRIVATE
     juce::juce_recommended_config_flags)
 
+# Headless test for dragging the whole song out as one MIDI region
+juce_add_console_app(BP303_SongMidiTest PRODUCT_NAME "BP303_SongMidiTest")
+target_sources(BP303_SongMidiTest PRIVATE
+    Tools/song_midi_test.cpp
+    Source/PluginProcessor.cpp
+    Source/PluginEditor.cpp)
+target_compile_definitions(BP303_SongMidiTest PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JucePlugin_Name="BP303")
+target_link_libraries(BP303_SongMidiTest PRIVATE
+    juce::juce_audio_utils
+    juce::juce_dsp
+    juce::juce_recommended_config_flags)
+
 # Headless, JUCE-free test for the per-voice snare and hat decay multipliers
 juce_add_console_app(BP303_DrumDecayTest PRODUCT_NAME "BP303_DrumDecayTest")
 target_sources(BP303_DrumDecayTest PRIVATE

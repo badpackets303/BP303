@@ -115,6 +115,22 @@ namespace bp303
         return s;
     }
 
+    // Copies one sequence onto the end of another at a tick offset. Used to lay
+    // a song out: each row's patterns are built once by the same exporters that
+    // serve a single-pattern drag, then stamped down the timeline at the tick the
+    // row starts on, so an arrangement and a pattern can never disagree about
+    // how a pattern is voiced.
+    inline void appendAt (juce::MidiMessageSequence& dest,
+                          const juce::MidiMessageSequence& src, double tickOffset)
+    {
+        for (int i = 0; i < src.getNumEvents(); ++i)
+        {
+            auto message = src.getEventPointer (i)->message;
+            message.setTimeStamp (message.getTimeStamp() + tickOffset);
+            dest.addEvent (message);
+        }
+    }
+
     // Writes the given tracks to a type-0/1 MIDI file. No tempo event is written,
     // so the region simply follows the host's project tempo.
     inline bool writeMidiFile (const juce::File& file,
