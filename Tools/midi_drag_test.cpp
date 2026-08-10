@@ -183,6 +183,40 @@ int main()
         check (allKick, "drum notes are GM kicks on channel 10");
     }
 
+    // --- an empty slot ---
+    // Slot 26 has never been written to, so it has no gated steps at all.
+    {
+        const auto file = dragOut (*editor, SongList::dragDescription (true, 26));
+        std::printf ("      [empty bass slot handed over a file: %d]\n",
+                     (int) file.existsAsFile());
+        if (file.existsAsFile())
+            std::printf ("      [and it contains %d notes]\n", (int) readNotes (file).size());
+        check (! file.existsAsFile(),
+               "an empty pattern refuses the drag instead of writing a noteless region");
+    }
+
+    // --- notes that sit past the pattern's own LENGTH -------------------------
+    // The grid holds 16 steps whatever LENGTH says, so a pattern can look full
+    // while playing none of it. The exporter walks the same steps playback does,
+    // which is right, but it means a pattern with every note past the loop point
+    // exports nothing at all.
+    {
+        proc.requestBassPattern (5);
+        pump (proc);
+        for (int i = 0; i < Sequencer303::maxSteps; ++i)
+            setBass (proc, i, false, -3);
+        for (int i = 8; i < 16; ++i)          // notes only in the second half
+            setBass (proc, i, true, 9);
+        proc.sequencer.length.store (4);      // ...but the loop stops at step 4
+
+        const auto file = dragOut (*editor, SongList::dragDescription (true, 5));
+        std::printf ("      [notes-past-length handed over a file: %d, notes %d]\n",
+                     (int) file.existsAsFile(),
+                     file.existsAsFile() ? (int) readNotes (file).size() : -1);
+        check (! file.existsAsFile(),
+               "a pattern whose notes all sit past LENGTH refuses the drag too");
+    }
+
     // --- anything that isn't a pattern-key drag is refused ---
     {
         check (! dragOut (*editor, juce::var ("something else")).existsAsFile(),

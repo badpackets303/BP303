@@ -131,12 +131,32 @@ namespace bp303
         }
     }
 
+    inline bool hasNotes (const juce::MidiMessageSequence& s)
+    {
+        for (int i = 0; i < s.getNumEvents(); ++i)
+            if (s.getEventPointer (i)->message.isNoteOn())
+                return true;
+        return false;
+    }
+
     // Writes the given tracks to a type-0/1 MIDI file. No tempo event is written,
     // so the region simply follows the host's project tempo.
     inline bool writeMidiFile (const juce::File& file,
                                const std::vector<juce::MidiMessageSequence>& tracks,
                                int lengthSteps)
     {
+        // Nothing to say, so say nothing. A noteless MIDI file is valid, and the
+        // drag used to succeed with one — but a host makes no region from it, so
+        // the drop just failed silently and looked like a bug in the drag. Two
+        // ways in: a pattern with no gated steps, and a pattern whose notes all
+        // sit past its own LENGTH, which still looks full on the 16-step grid.
+        bool anyNotes = false;
+        for (const auto& t : tracks)
+            anyNotes = anyNotes || hasNotes (t);
+
+        if (! anyNotes)
+            return false;
+
         juce::MidiFile mf;
         mf.setTicksPerQuarterNote (ticksPerQuarter);
 
