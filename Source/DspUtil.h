@@ -18,6 +18,27 @@ namespace dsp303
     // the drums are playing. Raise the track fader in the host to taste.
     inline constexpr float masterHeadroom = 0.3548f;   // -9 dB
 
+    // Constant-power pan: -1 hard left, 0 centre, +1 hard right. A source keeps
+    // its level as it moves out rather than dropping into the middle, so hard
+    // over is +3 dB on its own side.
+    //
+    // Centre is special-cased to exactly unity on both sides. The trig lands a
+    // hair under 1.0 in float, and "a hair under" is the difference between a
+    // width control at zero leaving a project alone and quietly re-voicing it.
+    // Both the drum spread and the bass unison rely on that being exact.
+    inline void panGains (float pan, float& gl, float& gr)
+    {
+        if (pan == 0.0f)
+        {
+            gl = gr = 1.0f;
+            return;
+        }
+
+        const float theta = (std::clamp (pan, -1.0f, 1.0f) + 1.0f) * 0.78539816f;
+        gl = std::cos (theta) * 1.41421356f;
+        gr = std::sin (theta) * 1.41421356f;
+    }
+
     // Master soft clip: unity slope at low level, hard ceiling at ±1.
     //
     // NOTE: this shapes *every* sample, so the gain it applies to one line moves

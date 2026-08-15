@@ -108,6 +108,39 @@ namespace
             setParam (proc, "ddisttype", 3.0f);
             runAudioCase ("running, every FX on (FOLD)", proc, 4000);
         }
+
+        // The EQ twice: what the twenty peaking filters cost, and what the band
+        // meters add on top of them. The meters only run with a window open, so
+        // the two are worth telling apart — and the flat case is worth having
+        // next to them, since a flat EQ is supposed to cost nothing whatever.
+        for (int stage = 0; stage < 3; ++stage)
+        {
+            BP303AudioProcessor proc;
+            proc.prepareToPlay (sampleRate, blockSize);
+            setParam (proc, "playmode", 1.0f);
+            setParam (proc, "run", 1.0f);
+            for (int s = 0; s < 16; ++s)
+                proc.sequencer.steps[(size_t) s].gate.store (true);
+            for (int lane = 0; lane < DrumSequencer::numLanes; ++lane)
+                proc.drumSequencer.stepMask[lane].store (0xffff);
+
+            setParam (proc, "beqon", 1.0f);
+            setParam (proc, "deqon", 1.0f);
+
+            if (stage > 0)
+                for (int line = 0; line < 2; ++line)
+                    for (int b = 0; b < GraphicEq::numBands; ++b)
+                        setParam (proc, BP303AudioProcessor::eqBandIds (line)[b],
+                                  b % 2 == 0 ? 8.0f : -8.0f);
+
+            if (stage == 2)
+                proc.addEqMeterClient (1);
+
+            runAudioCase (stage == 0 ? "EQ on but flat"
+                        : stage == 1 ? "EQ on, all bands driven"
+                                     : "EQ driven + band meters",
+                          proc, 4000);
+        }
     }
 
     // One repaint of `region`, the way the host's repaint of a dirty rectangle
@@ -186,24 +219,47 @@ namespace
         uiCase ("song list, whole", *editor, img, areaOf (songList), 25.0);
         uiCase ("pattern keys, whole", *editor, img, areaOf (keys), 8.0);
 
+        // The EQ display, at the two rates it actually redraws: a band's strip
+        // is what a moving level invalidates, up to ten times a frame with a
+        // page open, and the whole plot is what moving a node invalidates,
+        // which only happens while one is being dragged.
+        if (auto* bands = findDescendant<EqBands> (*editor))
+        {
+            uiCase ("one EQ band strip", *editor, img,
+                    editor->getLocalArea (bands, bands->bandStrip (4)), 25.0);
+            uiCase ("EQ plot, whole", *editor, img,
+                    editor->getLocalArea (bands, bands->plotArea()), 25.0);
+        }
+
         // Fixed cost of *any* repaint: the component tree walk, plus whatever
         // the background costs under a clip that throws nearly all of it away.
         uiCase ("a 10x10 pixel repaint", *editor, img,
                 areaOf (stepGrid).withSize (10, 10), 25.0);
 
-        // The two cells a moving playhead actually invalidates, at the rate the
+        // The cells a moving playhead actually invalidates, at the rate the
         // playhead actually moves: sixteenths at 120 BPM is 8 steps a second.
+        // The drum grid carries a marker per lane, so a step costs it two cells
+        // per lane rather than two in total — measured here rather than assumed,
+        // since that is the price of showing where a polymetric lane is.
         const auto ledA  = editor->getLocalArea (stepGrid, stepGrid->ledCellBounds (7));
         const auto ledB  = editor->getLocalArea (stepGrid, stepGrid->ledCellBounds (8));
-        const auto drumA = editor->getLocalArea (drumGrid, drumGrid->playheadCellBounds (7));
-        const auto drumB = editor->getLocalArea (drumGrid, drumGrid->playheadCellBounds (8));
 
         auto playing = [&] (juce::Image& into, float scale)
         {
-            return (paintOnce (*editor, into, ledA,  40, scale)
-                  + paintOnce (*editor, into, ledB,  40, scale)
-                  + paintOnce (*editor, into, drumA, 40, scale)
-                  + paintOnce (*editor, into, drumB, 40, scale)) * 8.0;
+            double drums = 0.0;
+            for (int lane = 0; lane < DrumSequencer::numLanes; ++lane)
+            {
+                drums += paintOnce (*editor, into,
+                                    editor->getLocalArea (drumGrid,
+                                        drumGrid->playheadCellBounds (lane, 7)), 40, scale);
+                drums += paintOnce (*editor, into,
+                                    editor->getLocalArea (drumGrid,
+                                        drumGrid->playheadCellBounds (lane, 8)), 40, scale);
+            }
+
+            return (paintOnce (*editor, into, ledA, 40, scale)
+                  + paintOnce (*editor, into, ledB, 40, scale)
+                  + drums) * 8.0;
         };
 
         auto allTimers = [&] (juce::Image& into, float scale)

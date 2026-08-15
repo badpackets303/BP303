@@ -57,7 +57,9 @@ jobs:
           cmake --build build --config Release --parallel 4
           --target BP303_WaveTest BP303_DistTest BP303_MasterTest
           BP303_DynFiltTest BP303_SpaceTest BP303_SongTest BP303_RepeatTest
-          BP303_AttackTest BP303_DrumDecayTest
+          BP303_AttackTest BP303_DrumDecayTest BP303_StereoBusTest
+          BP303_UnisonTest BP303_PolymeterTest BP303_EqTest BP303_GateSplitTest
+          BP303_BassMeterTest BP303_PadTest
 
       - name: Run portable tests
         shell: bash
