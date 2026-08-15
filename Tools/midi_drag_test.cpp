@@ -9,7 +9,10 @@
 #include "../Source/PluginEditor.h"
 #include "../Source/PluginProcessor.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <vector>
 
 namespace
 {
@@ -78,7 +81,15 @@ namespace
         bool canMove = true;
         const juce::DragAndDropTarget::SourceDetails details (description, nullptr, {});
 
-        if (! editor.shouldDropFilesWhenDraggedExternally (details, files, canMove))
+        // Bracketed the way a real gesture is: startDragging tells the editor a
+        // drag has begun, which is what arms the export for it. Calling the drop
+        // on its own would leave the previous drag's "already handed over" flag
+        // standing and quietly export nothing.
+        editor.dragOperationStarted (details);
+        const bool ok = editor.shouldDropFilesWhenDraggedExternally (details, files, canMove);
+        editor.dragOperationEnded (details);
+
+        if (! ok)
             return {};
         if (files.size() != 1)
             return {};
@@ -181,6 +192,77 @@ int main()
             if (n.channel != 10 || n.note != bp303::gmDrumNote[DrumMachine::BD])
                 allKick = false;
         check (allKick, "drum notes are GM kicks on channel 10");
+    }
+
+    // --- a lane on its own clock exports on that clock ---
+    // The region has to be what the plugin plays, and for these two lanes that
+    // is not "the mask, laid out in sixteenths": a short lane repeats inside the
+    // bar rather than stopping at its own end, and a fitted lane's steps are not
+    // sixteenths at all.
+    {
+        for (int l = 0; l < DrumSequencer::numLanes; ++l)
+            proc.drumSequencer.stepMask[l].store (0);
+
+        // three steps fitted across the bar — 3 against 4
+        proc.drumSequencer.stepMask[DrumMachine::CH].store (0b111);
+        proc.drumSequencer.laneLength[DrumMachine::CH].store (3);
+        proc.drumSequencer.laneFit[DrumMachine::CH].store (true);
+
+        // and a 6-step lane on the grid, which goes round twice plus four in a
+        // 16-step bar: hits on its own step 0 land at 0, 6 and 12
+        proc.drumSequencer.stepMask[DrumMachine::OH].store (1u << 0);
+        proc.drumSequencer.laneLength[DrumMachine::OH].store (6);
+
+        const auto file = dragOut (*editor, SongList::dragDescription (false, 0));
+        check (file.existsAsFile(), "dragging a polyrhythmic pattern out produced a file");
+
+        std::vector<double> hat, open;
+        for (const auto& n : readNotes (file))
+        {
+            if (n.note == bp303::gmDrumNote[DrumMachine::CH]) hat.push_back (n.tick);
+            if (n.note == bp303::gmDrumNote[DrumMachine::OH]) open.push_back (n.tick);
+        }
+        std::sort (hat.begin(), hat.end());
+        std::sort (open.begin(), open.end());
+
+        const double span = 16.0 * bp303::ticksPer16th / 3.0;
+        check (hat.size() == 3, "the fitted lane exported three hits");
+        bool spaced = hat.size() == 3;
+        for (size_t i = 0; spaced && i < hat.size(); ++i)
+            if (std::abs (hat[i] - (double) i * span) > 1.0)
+                spaced = false;
+        check (spaced, "the fitted lane's hits are not evenly spread across the bar");
+
+        const std::vector<double> wantOpen { 0.0, 6.0 * bp303::ticksPer16th,
+                                             12.0 * bp303::ticksPer16th };
+        check (open.size() == 3 && open == wantOpen,
+               "the 6-step lane did not repeat on its own cycle inside the bar");
+    }
+
+    // --- a split gate exports as repeats, not as one note ---
+    {
+        auto& st = proc.sequencer.steps[0];
+        st.gate.store (true);
+        st.slide.store (false);
+        st.hold.store (1);
+        st.ratchet.store (3);
+
+        const auto file = dragOut (*editor, SongList::dragDescription (true, 0));
+        check (file.existsAsFile(), "dragging a split gate out produced a file");
+
+        std::vector<double> ons;
+        for (const auto& n : readNotes (file))
+            ons.push_back (n.tick);
+        std::sort (ons.begin(), ons.end());
+
+        check (ons.size() == 3, "a 3-way split exported three notes");
+        bool spaced = ons.size() == 3;
+        for (size_t r = 0; spaced && r < ons.size(); ++r)
+            if (std::abs (ons[r] - (double) r * bp303::ticksPer16th / 3.0) > 1.0)
+                spaced = false;
+        check (spaced, "the split's repeats are not evenly spread through the step");
+
+        st.ratchet.store (1);
     }
 
     // --- an empty slot ---

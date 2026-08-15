@@ -4,15 +4,41 @@
 #include <cmath>
 #include <cstdint>
 
+#include "DspUtil.h"
 #include "StepDyn.h"
 
 // Synthesized 606 / 808 / 909 drum voices: kick, snare, clap, closed & open
 // hats. No samples — everything is generated. JUCE-free for standalone testing.
+//
+// The stereo overload places each voice across the pair. The width is real —
+// separate voices at separate positions, not a widener across the sum — so it
+// survives being summed back to mono instead of phasing away. SPREAD at zero
+// puts every voice back in the centre and both channels carry the mono sum.
+//
+// Keeping the voices apart costs the old sum its last bit: it used to accumulate
+// straight into one running total, which the compiler was free to fuse into an
+// FMA, and a per-voice store then summed cannot be. The arithmetic is otherwise
+// identical (proved by building both ways with -ffp-contract=off), so existing
+// patterns move by at most one ULP — around -145 dBFS, below the noise floor of
+// any converter this will ever reach. Nothing that matters rides on it: the
+// master stage's guarantee is that the drums don't modulate the *bass*, and that
+// is a property of the mix stage, not of this sum.
 class DrumMachine
 {
 public:
     enum Voice { BD, SD, CP, CH, OH, numVoices };
     enum class Kit { K808, K909, K606 };
+
+    // The default place for each voice at full spread: -1 hard left, +1 hard
+    // right. These are where the BALANCE page starts, not a limit — setPan takes
+    // whatever the player asks for.
+    //
+    // The kick starts centred and is worth leaving there: panning it throws away
+    // half its power on one side, and it is the first thing to collapse on a
+    // system that sums the low end to mono. The two hats start opposite each
+    // other because a closed hat chokes an open one, so a hat pattern alternates
+    // across the image instead of piling up on one side.
+    static constexpr float voicePan[numVoices] = { 0.0f, -0.15f, 0.55f, -0.60f, 0.50f };
 
     void prepare (double sr)
     {
@@ -28,7 +54,9 @@ public:
         bdPitchEnv = sdNoiseAmp = clickEnv = 0.0f;
         bdPhase = sdPhase1 = sdPhase2 = 0.0f;
         cpT = 0.0f;
-        lp1 = lp2 = hp1 = hp2 = chLp = chHp1 = chHp2 = ohLp = ohHp1 = ohHp2 = 0.0f;
+        lp1 = lp2 = hp1 = hp2 = 0.0f;
+        for (auto& s : chHp) s = 0.0f;
+        for (auto& s : ohHp) s = 0.0f;
         sdLp = sdHp = 0.0f;
         for (auto& p : metalPhase) p = 0.0f;
         rng = 0x12345678u;
@@ -118,14 +146,65 @@ public:
         }
     }
 
+    // Slides every voice out to `spread01` of its position in voicePan. Only the
+    // stereo render reads this; the mono one sums the voices whatever it says.
+    void setSpread (float spread01)
+    {
+        const float s = std::clamp (spread01, 0.0f, 1.0f);
+        float pans[numVoices];
+        for (int i = 0; i < numVoices; ++i)
+            pans[i] = voicePan[i] * s;
+        setPan (pans);
+    }
+
+    // Per-voice positions, for a caller that wants its own layout rather than
+    // voicePan scaled.
+    void setPan (const float* pans)
+    {
+        for (int i = 0; i < numVoices; ++i)
+            dsp303::panGains (pans[i], panL[i], panR[i]);
+    }
+
     // Adds into out
     void render (float* out, int n)
     {
         for (int i = 0; i < n; ++i)
-            out[i] += renderSample() * masterGain;
+        {
+            float v[numVoices];
+            renderVoices (v);
+            out[i] += (sum (v) * headroom) * masterGain;
+        }
+    }
+
+    // Adds into the channel pair, each voice at its own position.
+    void render (float* l, float* r, int n)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            float v[numVoices];
+            renderVoices (v);
+
+            float sl = 0.0f, sr = 0.0f;
+            for (int k = 0; k < numVoices; ++k)
+            {
+                sl += v[k] * panL[k];
+                sr += v[k] * panR[k];
+            }
+
+            l[i] += (sl * headroom) * masterGain;
+            r[i] += (sr * headroom) * masterGain;
+        }
     }
 
 private:
+    static float sum (const float* v)
+    {
+        float mix = 0.0f;
+        for (int i = 0; i < numVoices; ++i)
+            mix += v[i];
+        return mix;
+    }
+
     static float sel3 (Kit k, float a808, float a909, float a606)
     {
         return k == Kit::K808 ? a808 : (k == Kit::K909 ? a909 : a606);
@@ -142,9 +221,15 @@ private:
         return (float) (int32_t) rng * 4.656613e-10f;
     }
 
-    float renderSample()
+    // Each voice's contribution kept apart rather than summed on the spot, so
+    // the stereo render can place them. The headroom trim that used to ride on
+    // the sum here now lives in render(), since applying it per voice and
+    // summing is not the same arithmetic and would move every existing mix.
+    void renderVoices (float* v)
     {
-        float mix = 0.0f;
+        for (int i = 0; i < numVoices; ++i)
+            v[i] = 0.0f;
+
         const float twoPi = 6.2831853f;
 
         // ---- Kick ----
@@ -167,7 +252,7 @@ private:
                 s = std::tanh (1.7f * s);
                 s += noise() * 0.22f * clickEnv;   // 606 has a tight click too
             }
-            mix += s * bdAmp * levels[BD];
+            v[BD] = s * bdAmp * levels[BD];
 
             bdAmp *= bdAmpCoef;
             bdPitchEnv *= bdPitchCoef;
@@ -191,7 +276,7 @@ private:
             const float snare = (sdLp - sdHp) * sdNoiseAmp;
 
             const float noiseMix = sel3 (sdKit, 0.6f, 0.75f, 0.72f);
-            mix += (tone * (1.0f - noiseMix) + snare * noiseMix) * 1.4f * levels[SD];
+            v[SD] = (tone * (1.0f - noiseMix) + snare * noiseMix) * 1.4f * levels[SD];
 
             sdAmp *= sdToneCoef;
             sdNoiseAmp *= sdNoiseCoef;
@@ -210,7 +295,7 @@ private:
             float cn = noise();
             lp1 += (cn - lp1) * onePoleC (sel3 (cpKit, 2500.0f, 3500.0f, 3800.0f) * cpTune);
             hp1 += (lp1 - hp1) * onePoleC (sel3 (cpKit, 700.0f, 900.0f, 1100.0f) * cpTune);
-            mix += (lp1 - hp1) * env * cpAmp * 2.2f * levels[CP];
+            v[CP] = (lp1 - hp1) * env * cpAmp * 2.2f * levels[CP];
 
             cpT += 1.0f / sampleRate;
             if (cpT > 0.5f) cpAmp = 0.0f;
@@ -220,47 +305,95 @@ private:
         const bool hatsActive = chAmp > 1.0e-4f || ohAmp > 1.0e-4f;
         if (hatsActive)
         {
+            // The real 808's six oscillators, at twice their frequency. What you
+            // are meant to hear is the thicket of their upper square harmonics,
+            // not the oscillators themselves — the fundamentals sit far below the
+            // highpass corner and the filter is supposed to remove them. These
+            // used to run at 4x a different set, which put every fundamental in
+            // the 1-3.4 kHz range the ear reads as pitched metal, and a 12 dB/oct
+            // filter could not get them out again: one partial at 3.4 kHz stood
+            // 35 dB above its neighbours, where the 909's noise hat manages 15.
+            // That was the clang. Doubling keeps the harmonics dense up top
+            // without dragging the fundamentals back into it.
             float metal = 0.0f;
-            static constexpr float metalFreqs[6] = { 263.5f, 400.0f, 421.0f,
-                                                     474.0f, 587.3f, 845.0f };
+            static constexpr float metalFreqs[6] = { 205.3f, 304.4f, 369.6f,
+                                                     522.7f, 540.0f, 800.0f };
             for (int o = 0; o < 6; ++o)
             {
-                metalPhase[o] += metalFreqs[o] * 4.0f * hatTune / sampleRate;
+                metalPhase[o] += metalFreqs[o] * 2.0f * hatTune / sampleRate;
                 if (metalPhase[o] >= 1.0f) metalPhase[o] -= 1.0f;
                 metal += metalPhase[o] < 0.5f ? 1.0f : -1.0f;
             }
             metal *= 0.16f;
 
+            // The makeup gains are measured, not chosen: four poles throw away
+            // more than two, and more again at the higher corner a closed hat
+            // uses, so each one is whatever puts that voice back at the RMS it had
+            // before. Without them a saved pattern comes back with its hats
+            // several dB down. The 909 keeps 2.5, having changed in no way.
             if (chAmp > 1.0e-4f)
             {
-                // two cascaded one-pole highpasses; 606 sits brighter
-                const float src = chKit == Kit::K909 ? noise() : metal;
-                const float hp  = sel3 (chKit, 6500.0f, 6500.0f, 8500.0f) * hatTune;
-                chLp += (src - chLp) * onePoleC (hp);
-                const float h1 = src - chLp;
-                chHp1 += (h1 - chHp1) * onePoleC (hp);
-                mix += (h1 - chHp1) * chAmp * 2.5f * levels[CH];
+                const float hp = sel3 (chKit, 7000.0f, 6500.0f, 9000.0f) * hatTune;
+                v[CH] = hatVoice (chKit, metal, chHp, hp,
+                                  sel3 (chKit, 15.0f, 2.5f, 22.0f)) * chAmp * levels[CH];
                 chAmp *= chCoef;
             }
             if (ohAmp > 1.0e-4f)
             {
-                const float src = ohKit == Kit::K909 ? noise() : metal;
-                const float hp  = sel3 (ohKit, 5500.0f, 5500.0f, 7000.0f) * hatTune;
-                ohLp += (src - ohLp) * onePoleC (hp);
-                const float h1 = src - ohLp;
-                ohHp1 += (h1 - ohHp1) * onePoleC (hp);
-                mix += (h1 - ohHp1) * ohAmp * 2.5f * levels[OH];
+                const float hp = sel3 (ohKit, 6000.0f, 5500.0f, 7500.0f) * hatTune;
+                v[OH] = hatVoice (ohKit, metal, ohHp, hp,
+                                  sel3 (ohKit, 12.5f, 2.5f, 16.0f)) * ohAmp * levels[OH];
                 ohAmp *= ohCoef;
             }
         }
 
-        return mix * 0.7f;   // headroom against the bass line
     }
 
     float onePoleC (float freqHz) const
     {
         return 1.0f - std::exp (-twoPiOverSr * freqHz);
     }
+
+    // One hat, from the shared metal bank or from noise, through its own
+    // highpass cascade.
+    //
+    // The metal kits get four poles where they used to get two. Twelve dB an
+    // octave leaves the oscillator fundamentals audible as tones however they are
+    // tuned, and no amount of moving them helps — drop them an octave and their
+    // harmonics land in the same place. Steepness is what turns the bank into a
+    // sheen instead of a chord.
+    //
+    // The 909's hat is noise, which is flat to begin with and needs none of that,
+    // so it keeps the two poles and the gain it always had and comes out
+    // unchanged. Its `noise()` draw stays one per hat per sample for the same
+    // reason: the random stream must not shift under it.
+    float hatVoice (Kit hatKit, float metal, float* state, float freqHz, float gain)
+    {
+        // Six squares are a chord however they are filtered. A little noise fills
+        // between the partials, and that is what reads as air rather than ring.
+        static constexpr float noiseMix = 0.15f;
+
+        const bool noiseKit = hatKit == Kit::K909;
+        float src = noiseKit ? noise()
+                             : metal * (1.0f - noiseMix) + noise() * noiseMix;
+
+        const int   poles = noiseKit ? 2 : maxHatPoles;
+        const float c = onePoleC (freqHz);
+        for (int p = 0; p < poles; ++p)
+        {
+            state[p] += (src - state[p]) * c;
+            src -= state[p];
+        }
+
+        return src * gain;
+    }
+
+    static constexpr float headroom = 0.7f;   // against the bass line
+
+    // unity on both sides until setSpread/setPan says otherwise, so an untouched
+    // instance renders the mono sum into each channel
+    float panL[numVoices] = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
+    float panR[numVoices] = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
 
     float sampleRate = 44100.0f;
     float twoPiOverSr = 6.2831853f / 44100.0f;
@@ -286,7 +419,8 @@ private:
     // hats
     float metalPhase[6] = {};
     float chAmp = 0, ohAmp = 0, chCoef = 0.99f, ohCoef = 0.99f;
-    float chLp = 0, chHp1 = 0, chHp2 = 0, ohLp = 0, ohHp1 = 0, ohHp2 = 0;
+    static constexpr int maxHatPoles = 4;
+    float chHp[maxHatPoles] = {}, ohHp[maxHatPoles] = {};
     Kit   chKit = Kit::K808, ohKit = Kit::K808;
 
     uint32_t rng = 0x12345678u;

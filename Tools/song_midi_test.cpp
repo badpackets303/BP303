@@ -84,7 +84,15 @@ namespace
         bool canMove = true;
         const juce::DragAndDropTarget::SourceDetails details { "BP303SONG", nullptr, {} };
 
-        if (! editor.shouldDropFilesWhenDraggedExternally (details, files, canMove))
+        // Bracketed the way a real gesture is: startDragging tells the editor a
+        // drag has begun, which is what arms the export for it. Calling the drop
+        // on its own would leave the previous drag's "already handed over" flag
+        // standing and quietly export nothing.
+        editor.dragOperationStarted (details);
+        const bool ok = editor.shouldDropFilesWhenDraggedExternally (details, files, canMove);
+        editor.dragOperationEnded (details);
+
+        if (! ok)
             return {};
         if (files.size() != 1 || canMove)
             return {};
@@ -242,9 +250,9 @@ int main()
                "and no drums");
     }
 
-    // --- both lines share one region ------------------------------------------
-    // The file is meant to drop back onto a BP303, which reads bass on channel 1
-    // and drums on channel 10, so one region has to carry the whole arrangement.
+    // --- the two lines land on a track each -----------------------------------
+    // A host places regions per track, not per channel, so both lines on one
+    // track means both lines on whichever instrument the pointer was over.
     {
         setSong (proc, { row (0, 0, 2) });
         const auto file = dragSongOut (*editor);
@@ -252,11 +260,57 @@ int main()
         juce::FileInputStream in (file);
         juce::MidiFile mf;
         check (mf.readFrom (in), "the file parses as MIDI");
-        check (mf.getNumTracks() == 1, "the song is one track, so it drops as one region");
+        check (mf.getNumTracks() == 2, "the song is two tracks, so the lines land apart");
 
         const auto notes = readNotes (file);
         check (countOn (notes, 1) > 0 && countOn (notes, 10) > 0,
-               "carrying bass on channel 1 and drums on channel 10 together");
+               "carrying bass on channel 1 and drums on channel 10");
+    }
+
+    // --- the drag mode picks which lines come out -----------------------------
+    // A host places regions per track, not per channel, so the one-region default
+    // drops both lines onto whatever instrument the pointer is over. The modes are
+    // the way out of that, and each has to leave the arrangement walk alone.
+    {
+        setSong (proc, { row (0, 0, 2) });
+
+        editor->setSongMidiMode (BP303AudioProcessorEditor::bassOnly);
+        {
+            const auto file = dragSongOut (*editor);
+            const auto notes = readNotes (file);
+            check (countOn (notes, 1) == 2 && countOn (notes, 10) == 0,
+                   "BASS hands over the bass alone");
+            check (file.getFileName().contains ("Bass"),
+                   "under a name that says so, since the host names the region after it");
+        }
+
+        editor->setSongMidiMode (BP303AudioProcessorEditor::drumsOnly);
+        {
+            const auto notes = readNotes (dragSongOut (*editor));
+            check (countOn (notes, 1) == 0 && countOn (notes, 10) == 2,
+                   "DRUM hands over the drums alone");
+            check (hasNoteAt (notes, 10, bp303::gmDrumNote[0], bar),
+                   "still laid out on the bass pattern's grid, which owns the bar");
+        }
+
+        editor->setSongMidiMode (BP303AudioProcessorEditor::splitTracks);
+
+        // A song with no drums in it should hand over the bass, not a bass track
+        // plus a silent one that reads as half the drag having failed.
+        {
+            setSong (proc, { row (0, SongPlayer::hold, 1) });
+            juce::FileInputStream in (dragSongOut (*editor));
+            juce::MidiFile mf;
+            check (mf.readFrom (in) && mf.getNumTracks() == 1,
+                   "the default writes no empty track for a line the song never plays");
+        }
+
+        {
+            setSong (proc, { row (0, 0, 2) });
+            const auto notes = readNotes (dragSongOut (*editor));
+            check (countOn (notes, 1) == 2 && countOn (notes, 10) == 2,
+                   "and nothing is lost splitting the two lines apart");
+        }
     }
 
     // --- a row's length comes from its own bass pattern ------------------------

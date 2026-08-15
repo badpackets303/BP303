@@ -112,6 +112,58 @@ target_link_libraries(BP303_DrumTabSnapshot PRIVATE
     juce::juce_dsp
     juce::juce_recommended_config_flags)
 
+# Renders one snapshot per EQ tab, with a curve dialled in and the band meters
+# live — the only way to see the meters move without opening a host
+juce_add_console_app(BP303_EqTabSnapshot PRODUCT_NAME "BP303_EqTabSnapshot")
+target_sources(BP303_EqTabSnapshot PRIVATE
+    Tools/eqtab_snapshot.cpp
+    Source/PluginProcessor.cpp
+    Source/PluginEditor.cpp)
+target_compile_definitions(BP303_EqTabSnapshot PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JucePlugin_Name="BP303")
+target_link_libraries(BP303_EqTabSnapshot PRIVATE
+    juce::juce_audio_utils
+    juce::juce_dsp
+    juce::juce_recommended_config_flags)
+
+# Renders one snapshot per XY pad mode with the pad held off centre — at rest
+# the pad draws a handle in an empty square and none of the states worth seeing
+juce_add_console_app(BP303_PadTabSnapshot PRODUCT_NAME "BP303_PadTabSnapshot")
+target_sources(BP303_PadTabSnapshot PRIVATE
+    Tools/padtab_snapshot.cpp
+    Source/PluginProcessor.cpp
+    Source/PluginEditor.cpp)
+target_compile_definitions(BP303_PadTabSnapshot PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    # The pad's sparks come off its own timer, so the drag snapshot has to let
+    # the message loop run between the moves. Only this dev aid needs it — the
+    # plugin never runs a modal loop.
+    JUCE_MODAL_LOOPS_PERMITTED=1
+    JucePlugin_Name="BP303")
+target_link_libraries(BP303_PadTabSnapshot PRIVATE
+    juce::juce_audio_utils
+    juce::juce_dsp
+    juce::juce_recommended_config_flags)
+
+# Renders every step of the help tour — the only way to proofread it, and to see
+# a step whose text has outgrown its callout or landed on top of what it points at
+juce_add_console_app(BP303_HelpSnapshot PRODUCT_NAME "BP303_HelpSnapshot")
+target_sources(BP303_HelpSnapshot PRIVATE
+    Tools/help_snapshot.cpp
+    Source/PluginProcessor.cpp
+    Source/PluginEditor.cpp)
+target_compile_definitions(BP303_HelpSnapshot PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JucePlugin_Name="BP303")
+target_link_libraries(BP303_HelpSnapshot PRIVATE
+    juce::juce_audio_utils
+    juce::juce_dsp
+    juce::juce_recommended_config_flags)
+
 # Renders one knob across its whole travel, per skin, for judging anything that
 # varies along the sweep — the editor snapshots only ever show one position
 juce_add_console_app(BP303_KnobSnapshot PRODUCT_NAME "BP303_KnobSnapshot")
@@ -181,6 +233,65 @@ target_sources(BP303_DynFiltTest PRIVATE
 target_link_libraries(BP303_DynFiltTest PRIVATE
     juce::juce_recommended_config_flags)
 
+# Headless, JUCE-free test that the stereo overloads on the pre-delay units cost
+# nothing: identical channels in must give the mono result out, and the two
+# channels must not share state
+juce_add_console_app(BP303_StereoBusTest PRODUCT_NAME "BP303_StereoBusTest")
+target_sources(BP303_StereoBusTest PRIVATE
+    Tools/stereo_bus_test.cpp)
+target_link_libraries(BP303_StereoBusTest PRIVATE
+    juce::juce_recommended_config_flags)
+
+# Headless, JUCE-free test for UNISON on the bass voice: one voice is still the
+# plain 303, VOICES holds its level, and SPREAD widens without cancelling in mono
+juce_add_console_app(BP303_UnisonTest PRODUCT_NAME "BP303_UnisonTest")
+target_sources(BP303_UnisonTest PRIVATE
+    Tools/unison_test.cpp)
+target_link_libraries(BP303_UnisonTest PRIVATE
+    juce::juce_recommended_config_flags)
+
+# Headless, JUCE-free test for the ten-band graphic EQ: flat is bit-identical
+# (on, off, and after a band has been moved and put back), each fader hits its
+# own centre, the pair never widens, and the meters follow the signal
+juce_add_console_app(BP303_EqTest PRODUCT_NAME "BP303_EqTest")
+target_sources(BP303_EqTest PRIVATE
+    Tools/eq_test.cpp)
+target_link_libraries(BP303_EqTest PRIVATE
+    juce::juce_recommended_config_flags)
+
+# Headless, JUCE-free test for the bass line running its own cycle: LENGTH still
+# means the bar, a short line drifts against it, and a fitted one divides it
+juce_add_console_app(BP303_BassMeterTest PRODUCT_NAME "BP303_BassMeterTest")
+target_sources(BP303_BassMeterTest PRIVATE
+    Tools/bass_meter_test.cpp)
+target_link_libraries(BP303_BassMeterTest PRIVATE
+    juce::juce_recommended_config_flags)
+
+# Headless, JUCE-free test for splitting a bass gate: an unsplit pattern is
+# untouched, and a split one retriggers inside its own step
+juce_add_console_app(BP303_GateSplitTest PRODUCT_NAME "BP303_GateSplitTest")
+target_sources(BP303_GateSplitTest PRIVATE
+    Tools/gate_split_test.cpp)
+target_link_libraries(BP303_GateSplitTest PRIVATE
+    juce::juce_recommended_config_flags)
+
+# Headless, JUCE-free test for the XY pad's mapping: an untouched pad is inert,
+# a mode reaches only its own destinations, and every one of them is in a unit
+# the mode engages
+juce_add_console_app(BP303_PadTest PRODUCT_NAME "BP303_PadTest")
+target_sources(BP303_PadTest PRIVATE
+    Tools/pad_test.cpp)
+target_link_libraries(BP303_PadTest PRIVATE
+    juce::juce_recommended_config_flags)
+
+# Headless, JUCE-free test for per-lane drum pattern length: a following lane is
+# unchanged, a short lane free-runs, and the master still owns the bar
+juce_add_console_app(BP303_PolymeterTest PRODUCT_NAME "BP303_PolymeterTest")
+target_sources(BP303_PolymeterTest PRIVATE
+    Tools/polymeter_test.cpp)
+target_link_libraries(BP303_PolymeterTest PRIVATE
+    juce::juce_recommended_config_flags)
+
 # Headless, JUCE-free test that the master stage mixes rather than shapes:
 # the drums must not modulate the bass on their way through it
 juce_add_console_app(BP303_MasterTest PRODUCT_NAME "BP303_MasterTest")
@@ -239,6 +350,22 @@ target_sources(BP303_DistTest PRIVATE
 target_link_libraries(BP303_DistTest PRIVATE
     juce::juce_recommended_config_flags)
 
+# Headless test that a mono host buffer gets the fold-down of the pair rather
+# than just its left channel
+juce_add_console_app(BP303_MonoFoldTest PRODUCT_NAME "BP303_MonoFoldTest")
+target_sources(BP303_MonoFoldTest PRIVATE
+    Tools/mono_fold_test.cpp
+    Source/PluginProcessor.cpp
+    Source/PluginEditor.cpp)
+target_compile_definitions(BP303_MonoFoldTest PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JucePlugin_Name="BP303")
+target_link_libraries(BP303_MonoFoldTest PRIVATE
+    juce::juce_audio_utils
+    juce::juce_dsp
+    juce::juce_recommended_config_flags)
+
 # Headless test that the distortion type + controls reach the audio
 juce_add_console_app(BP303_DistWireTest PRODUCT_NAME "BP303_DistWireTest")
 target_sources(BP303_DistWireTest PRIVATE
@@ -250,6 +377,22 @@ target_compile_definitions(BP303_DistWireTest PRIVATE
     JUCE_USE_CURL=0
     JucePlugin_Name="BP303")
 target_link_libraries(BP303_DistWireTest PRIVATE
+    juce::juce_audio_utils
+    juce::juce_dsp
+    juce::juce_recommended_config_flags)
+
+# Headless test that every FX control reaches the audio when its unit is
+# ACTIVE, and reaches nothing when it isn't — what a host's automation drives
+juce_add_console_app(BP303_AutomationTest PRODUCT_NAME "BP303_AutomationTest")
+target_sources(BP303_AutomationTest PRIVATE
+    Tools/automation_test.cpp
+    Source/PluginProcessor.cpp
+    Source/PluginEditor.cpp)
+target_compile_definitions(BP303_AutomationTest PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JucePlugin_Name="BP303")
+target_link_libraries(BP303_AutomationTest PRIVATE
     juce::juce_audio_utils
     juce::juce_dsp
     juce::juce_recommended_config_flags)
@@ -339,6 +482,22 @@ target_compile_definitions(BP303_MidiDragTest PRIVATE
     JUCE_USE_CURL=0
     JucePlugin_Name="BP303")
 target_link_libraries(BP303_MidiDragTest PRIVATE
+    juce::juce_audio_utils
+    juce::juce_dsp
+    juce::juce_recommended_config_flags)
+
+# Headless test that the drum lane handle's three gestures stay distinct:
+# drag sets length, double-click toggles FIT, right-click returns to the master
+juce_add_console_app(BP303_FitGestureTest PRODUCT_NAME "BP303_FitGestureTest")
+target_sources(BP303_FitGestureTest PRIVATE
+    Tools/fit_gesture_test.cpp
+    Source/PluginProcessor.cpp
+    Source/PluginEditor.cpp)
+target_compile_definitions(BP303_FitGestureTest PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JucePlugin_Name="BP303")
+target_link_libraries(BP303_FitGestureTest PRIVATE
     juce::juce_audio_utils
     juce::juce_dsp
     juce::juce_recommended_config_flags)
@@ -448,4 +607,12 @@ target_compile_definitions(BP303_FxTabTest PRIVATE
 target_link_libraries(BP303_FxTabTest PRIVATE
     juce::juce_audio_utils
     juce::juce_dsp
+    juce::juce_recommended_config_flags)
+
+
+# Headless, JUCE-free test for the hi-hat voicing
+juce_add_console_app(BP303_HatTest PRODUCT_NAME "BP303_HatTest")
+target_sources(BP303_HatTest PRIVATE
+    Tools/hat_test.cpp)
+target_link_libraries(BP303_HatTest PRIVATE
     juce::juce_recommended_config_flags)

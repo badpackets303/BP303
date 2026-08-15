@@ -62,25 +62,30 @@ namespace
 
     // Move the playhead from `from` to `to`, and check that redrawing only the
     // cells the grid would invalidate lands on the same pixels as a full redraw.
+    //
+    // The drum grid carries a marker per lane, so "the cells a move invalidates"
+    // is a list rather than a pair — setStep takes the step and puts every marker
+    // that grid moves where it belongs, and cellsFor returns all of them.
     void checkPartialRepaint (const char* name,
                               juce::AudioProcessorEditor& editor,
-                              std::atomic<int>& playingStep,
-                              juce::Rectangle<int> cellFrom,
-                              juce::Rectangle<int> cellTo,
+                              std::function<void (int)> setStep,
+                              std::function<std::vector<juce::Rectangle<int>> (int)> cellsFor,
                               int from, int to)
     {
-        playingStep.store (from);
+        setStep (from);
         auto partial = fullRender (editor);
 
-        playingStep.store (to);
-        renderInto (partial, editor, cellFrom);
-        renderInto (partial, editor, cellTo);
+        setStep (to);
+        for (auto r : cellsFor (from))
+            renderInto (partial, editor, r);
+        for (auto r : cellsFor (to))
+            renderInto (partial, editor, r);
 
         const auto full = fullRender (editor);
         const int differing = pixelsDiffering (partial, full);
 
         check (differing == 0,
-               juce::String (name) + ": redrawing two cells matches a full repaint"
+               juce::String (name) + ": redrawing the moved cells matches a full repaint"
                    + (differing == 0 ? "" : " (" + juce::String (differing) + " px differ)"));
     }
 }
@@ -123,23 +128,39 @@ int main()
     for (const auto move : { std::pair { 0, 1 }, std::pair { 7, 8 }, std::pair { 15, 0 } })
     {
         checkPartialRepaint (
-            "step grid", *editor, proc.sequencer.playingStep,
-            editor->getLocalArea (stepGrid, stepGrid->ledCellBounds (move.first)),
-            editor->getLocalArea (stepGrid, stepGrid->ledCellBounds (move.second)),
+            "step grid", *editor,
+            [&proc] (int s) { proc.sequencer.playingStep.store (s); },
+            [&] (int s) {
+                return std::vector<juce::Rectangle<int>> {
+                    editor->getLocalArea (stepGrid, stepGrid->ledCellBounds (s)) };
+            },
             move.first, move.second);
 
         checkPartialRepaint (
-            "drum grid", *editor, proc.drumSequencer.playingStep,
-            editor->getLocalArea (drumGrid, drumGrid->playheadCellBounds (move.first)),
-            editor->getLocalArea (drumGrid, drumGrid->playheadCellBounds (move.second)),
+            "drum grid", *editor,
+            [&proc] (int s) {
+                proc.drumSequencer.playingStep.store (s);
+                for (auto& lane : proc.drumSequencer.lanePlayingStep)
+                    lane.store (s);
+            },
+            [&] (int s) {
+                std::vector<juce::Rectangle<int>> cells;
+                for (int lane = 0; lane < DrumSequencer::numLanes; ++lane)
+                    cells.push_back (editor->getLocalArea (
+                        drumGrid, drumGrid->playheadCellBounds (lane, s)));
+                return cells;
+            },
             move.first, move.second);
     }
 
     // And leaving the pattern entirely (transport stopped) has to clear it.
     checkPartialRepaint (
-        "step grid, stopping", *editor, proc.sequencer.playingStep,
-        editor->getLocalArea (stepGrid, stepGrid->ledCellBounds (9)),
-        editor->getLocalArea (stepGrid, stepGrid->ledCellBounds (-1)),
+        "step grid, stopping", *editor,
+        [&proc] (int s) { proc.sequencer.playingStep.store (s); },
+        [&] (int s) {
+            return std::vector<juce::Rectangle<int>> {
+                editor->getLocalArea (stepGrid, stepGrid->ledCellBounds (s)) };
+        },
         9, -1);
 
     std::printf (failures == 0 ? "\nall repaint checks passed\n"

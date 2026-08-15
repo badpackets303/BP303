@@ -8,7 +8,9 @@
 #include "DrumMachine.h"
 #include "DrumSequencer.h"
 #include "DspUtil.h"
+#include "Eq.h"
 #include "Fx303.h"
+#include "MacroPad.h"
 #include "Metronome.h"
 #include "Pcf.h"
 #include "Reverb.h"
@@ -60,9 +62,14 @@ public:
             bool gate = false, slide = false;
             int  dyn = dyn303::Normal;   // soft / normal / accented
             int  hold = 1;     // note length in steps
+            int  ratchet = 1;  // times the gate fires inside its own step
         };
         BassStep bass[Sequencer303::maxSteps];
-        int length = 16;
+        int length = 16;          // the bar
+        // and how many of its steps the line runs. followBar (0) is what a
+        // pattern saved before the line could run short of the bar means.
+        int lineLength = Sequencer303::followBar;
+        bool lineFit = false;
 
         bool isEmpty() const
         {
@@ -78,6 +85,13 @@ public:
         uint32_t drumSteps[DrumSequencer::numLanes] = {};
         uint32_t drumAccents[DrumSequencer::numLanes] = {};
         uint32_t drumSofts[DrumSequencer::numLanes] = {};
+        uint32_t drumRatchets[DrumSequencer::numLanes] = {};
+        // DrumSequencer::followMaster (0) on every lane, which is what a pattern
+        // saved before lanes had their own length means and what it did.
+        int laneLength[DrumSequencer::numLanes] = {};
+        // and false is the sixteenth grid, which is what a lane did before it
+        // could be fitted to the bar
+        bool laneFit[DrumSequencer::numLanes] = {};
 
         bool isEmpty() const
         {
@@ -153,6 +167,22 @@ public:
     // directly instead of rendering a step's worth of audio per move.
     void updateHoldLatch (int playingStep);
 
+    // --- graphic EQ ----------------------------------------------------------
+    // The parameter ids for one line's ten bands, in band order, and its ACTIVE
+    // switch. Line 0 is the bass, 1 the drums. Shared with the editor so the
+    // faders and the audio path can't drift onto different parameters.
+    static const char* const* eqBandIds (int line);
+    static const char*        eqActiveId (int line);
+
+    // Post-EQ level in one band, 0..1 across GraphicEq::meterFloorDb..0 dBFS.
+    float eqBandLevel (int line, int band) const;
+
+    // The meters cost a bandpass pair and a follower per band, which is real
+    // work for something nobody is looking at with the window shut. Counted
+    // rather than a flag: a host is entitled to have two editors open, and the
+    // second one closing must not switch the first one's meters off.
+    void addEqMeterClient (int delta);
+
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
@@ -186,12 +216,24 @@ private:
 
     Distortion::Params distParams (const DistIds&) const;
 
+
+    // Reads one line's ten faders into `out` and returns its ACTIVE state.
+    // Spelled-out ids for the reason the distortion's are: assembling "beq" plus
+    // an index every block would allocate on the audio thread.
+    bool eqGains (int line, float* out) const;
+
     Synth303 synth;
 
 public:
     Sequencer303  sequencer;       // exposed for the editor
     DrumSequencer drumSequencer;
     SongPlayer    song;
+
+    // The XY pad's state. Read once a block on the audio thread rather than per
+    // destination — the offsets it produces are wanted at six points down the
+    // two chains — and read by the editor for the arc it draws round each knob
+    // the pad is pushing, so that arc cannot disagree with what is being heard.
+    macropad::Pad readPad() const;
 
     // Song step currently playing, or -1 when song mode is off / the song is
     // empty. For the editor's playing-row highlight.
@@ -245,10 +287,17 @@ private:
     Compressor bassComp, drumComp; // per-line glue compressor
     Chorus bassChorus, drumChorus; // per-line modulated thickening
     Reverb bassReverb, drumReverb; // per-line space, last in each chain
+    // Ten-band tone shaping on each finished line, after everything else and
+    // before the sum. Last rather than earlier in the chain so it is a channel
+    // EQ — what you dial is what leaves the line, rather than something the
+    // delay and reverb then colour further — and so its meters read what
+    // actually goes into the mix.
+    GraphicEq bassEq, drumEq;
+    std::atomic<int> eqMeterClients { 0 };
     Metronome metronome;
     dsp303::MasterLimiter masterLimiter;   // safety ceiling on the summed mix
     std::vector<float>     drumBuffer, drumBufferR;
-    std::vector<float>     monBuffer;
+    std::vector<float>     monBuffer, monBufferR;
     // stand-in right channel for a host that hands us a mono block anyway
     std::vector<float>     spareRight;
     std::vector<SeqEvent>  seqEvents;

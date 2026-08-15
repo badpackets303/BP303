@@ -5,9 +5,29 @@
 #include <iterator>
 #include <vector>
 
+#include "DspUtil.h"
+
 // Monophonic 303-style voice: PolyBLEP saw/pulse oscillator into a
 // zero-delay-feedback 4-pole ladder filter, with the classic accent and
 // slide behaviour. Deliberately JUCE-free so it can be unit-tested standalone.
+//
+// UNISON runs several of those oscillators at once, detuned symmetrically about
+// the played pitch and placed across the image in the same order, so the voices
+// furthest out of tune are also furthest apart. It is the only thing on the bass
+// line that produces width: with one voice the two channels are identical and
+// nothing downstream separates them.
+//
+// The width is genuinely two different signals rather than one signal phase-
+// tricked into sounding wide, which is what makes it safe on a bass — summed
+// back to mono the detuned copies beat against each other exactly as they did
+// in stereo instead of partially cancelling. That is worth stating because the
+// cheap alternatives (Haas, mid-side) do cancel, and on a bass line played out
+// on a system that sums the low end that is the whole sound gone.
+//
+// Each channel gets its own ladder rather than one filter on a summed signal.
+// Two ladders fed slightly different mixes land their resonant peaks fractionally
+// apart, and that difference is most of what makes unison sound big rather than
+// merely doubled.
 class Synth303
 {
 public:
@@ -15,6 +35,10 @@ public:
     // the end or every saved project changes what it plays.
     enum class Wave { Saw, Square, Pulse };
     static constexpr int numWaves = 3;
+
+    // Seven is where adding voices stops changing the sound much and starts
+    // just costing oscillators.
+    static constexpr int maxUnison = 7;
 
     void prepare (double sr)
     {
@@ -31,9 +55,26 @@ public:
 
     void reset()
     {
-        s1 = s2 = s3 = s4 = 0.0f;
-        dcX1 = dcY1 = 0.0f;
-        phase = 0.0;
+        for (auto& l : lad)
+            l = {};
+        // Scattered across the cycle rather than all starting together: stacked
+        // oscillators leaving zero in step sum coherently into one loud edge
+        // before the detuning pulls them apart.
+        //
+        // Scattered, though, and specifically *not* evenly spaced. N saws at even
+        // k/N spacing sum to a saw at N times the frequency with 1/N the
+        // amplitude — the fundamental cancels almost exactly, and measured on the
+        // real voice that cost nearly 5 dB at seven voices, turning VOICES into a
+        // volume control pointing the wrong way. These offsets come off a hash
+        // instead, which is uneven enough to have no such identity and still the
+        // same every run, so a render stays reproducible. Voice 0 lands on zero,
+        // where the single oscillator has always started.
+        for (int v = 0; v < maxUnison; ++v)
+        {
+            uint32_t h = (uint32_t) v * 2654435761u;
+            h ^= h >> 15; h *= 2246822519u; h ^= h >> 13;
+            uniPhase[v] = (double) h / 4294967296.0;
+        }
         vibPhase = 0.0;
         env = accEnv = accEnvSmoothed = amp = 0.0f;
         envRising = false;
@@ -63,6 +104,37 @@ public:
 
         if (! heldNotes.empty())
             targetFreq = midiToFreq ((float) heldNotes.back() + tuning);
+    }
+
+    // voices:      1 is the plain 303 — one oscillator, no width, and the output
+    //              both channels carry is what this voice has always produced.
+    // detuneCents: half-width of the spread, so the outermost pair sits this far
+    //              either side of the played pitch.
+    // spread01:    how far across the image that same spread is placed.
+    void setUnison (int voices, float detuneCents, float spread01)
+    {
+        const int n = std::clamp (voices, 1, maxUnison);
+        const float cents = std::max (0.0f, detuneCents);
+        const float spread = std::clamp (spread01, 0.0f, 1.0f);
+
+        for (int v = 0; v < n; ++v)
+        {
+            // -1 .. +1 across the stack; the lone voice of a 1-voice unison sits
+            // dead centre, which is what keeps it bit-identical to no unison.
+            const float t = n == 1 ? 0.0f
+                                   : 2.0f * (float) v / (float) (n - 1) - 1.0f;
+
+            uniRatio[v] = std::exp2 (t * cents / 1200.0f);
+            dsp303::panGains (t * spread, uniL[v], uniR[v]);
+        }
+
+        // Detuned voices are uncorrelated within a few milliseconds, so their
+        // power adds rather than their amplitude: 1/sqrt(n) holds the level as
+        // voices come in. Anything else and VOICES would double as a gain knob,
+        // and on this voice that means driving the ladder's tanh harder — a
+        // timbre change dressed up as a width change.
+        uniNorm = 1.0f / std::sqrt ((float) n);
+        unisonVoices = n;
     }
 
     // dyn is a Sequencer303::Dyn: below zero soft, zero normal, above accented.
@@ -147,13 +219,34 @@ public:
 
     bool hasHeldNotes() const { return ! heldNotes.empty(); }
 
+    // The mono render is the fold-down of the pair, not a separate path: with
+    // one voice (or SPREAD at zero) the channels are identical, and l + l halved
+    // is exactly l, so this stays sample-for-sample what it always was.
     void render (float* out, int numSamples)
     {
         for (int i = 0; i < numSamples; ++i)
-            out[i] = renderSample();
+        {
+            float l, r;
+            renderSample (l, r);
+            out[i] = (l + r) * 0.5f;
+        }
+    }
+
+    void render (float* l, float* r, int numSamples)
+    {
+        for (int i = 0; i < numSamples; ++i)
+            renderSample (l[i], r[i]);
     }
 
 private:
+    // One channel's filter: the four ladder integrators and the DC blocker that
+    // follows them.
+    struct Ladder
+    {
+        float s1 = 0.0f, s2 = 0.0f, s3 = 0.0f, s4 = 0.0f;
+        float dcX1 = 0.0f, dcY1 = 0.0f;
+    };
+
     static float midiToFreq (float note)
     {
         return 440.0f * std::exp2 ((note - 69.0f) / 12.0f);
@@ -172,7 +265,7 @@ private:
         return y;
     }
 
-    float renderSample()
+    void renderSample (float& outL, float& outR)
     {
         // Pitch glide (slide)
         currentFreq += (targetFreq - currentFreq) * glideCoef;
@@ -209,40 +302,28 @@ private:
             vibPhase -= 1.0;
         const float vibSemis = vibDepth * std::sin ((float) (2.0 * 3.14159265358979 * vibPhase));
         const double freq = currentFreq * std::exp2 (vibSemis / 12.0f);
-        const double dt = freq / sampleRate;
-        phase += dt;
-        if (phase >= 1.0)
-            phase -= 1.0;
 
-        const float t = (float) phase;
-        const float fdt = (float) dt;
-        float osc;
-        if (wave == Wave::Saw)
+        // The unison bank. Every voice shares the glide, the vibrato and both
+        // envelopes — this is one 303 voice played by several oscillators, not
+        // several voices — so only the frequency and the position differ.
+        float oscL = 0.0f, oscR = 0.0f;
+        for (int v = 0; v < unisonVoices; ++v)
         {
-            osc = 2.0f * t - 1.0f - polyBlep (t, fdt);
-        }
-        else
-        {
-            // A square is a 50% pulse; PULSE just narrows it. Narrowing costs
-            // fundamental — a pulse's fundamental follows sin(pi * width) — and
-            // brings in the even harmonics a square has none of. That trade is
-            // the thinner, reedier tone, and it hands the ladder a denser set of
-            // partials to sweep through.
-            const float width = wave == Wave::Pulse ? pulseWidth : 0.5f;
+            const double dt = freq * uniRatio[v] / sampleRate;
+            uniPhase[v] += dt;
+            if (uniPhase[v] >= 1.0)
+                uniPhase[v] -= 1.0;
 
-            osc = (t < width ? 1.0f : -1.0f);
-            osc += polyBlep (t, fdt);
-            osc -= polyBlep (std::fmod (t + 1.0f - width, 1.0f), fdt);
-
-            // Any width but 50% leaves the wave sitting off centre by its own
-            // mean. Left in, the amp envelope would sweep that DC into a click at
-            // every note edge and it would push the ladder's tanh permanently to
-            // one side, so it comes straight back off. At 50% this is a no-op.
-            osc -= 2.0f * width - 1.0f;
+            const float o = oscillator ((float) uniPhase[v], (float) dt);
+            oscL += o * uniL[v];
+            oscR += o * uniR[v];
         }
+        oscL *= uniNorm;
+        oscR *= uniNorm;
 
         // Filter cutoff: base cutoff pushed up by the filter envelope and the
-        // (smoothed) accent envelope, in octaves.
+        // (smoothed) accent envelope, in octaves. Shared by both ladders — the
+        // envelopes belong to the note, not to a side of the image.
         const float envOctaves = envMod * 5.0f * env
                                + accent * 2.5f * accEnvSmoothed;
         float fc = cutoff * std::exp2 (envOctaves);
@@ -253,10 +334,43 @@ private:
         const float G = g / (1.0f + g);
         const float k = resonance * 4.2f;
 
-        const float S = (G * G * G * s1 + G * G * s2 + G * s3 + s4) / (1.0f + g);
+        outL = ladder (lad[0], oscL, g, G, k);
+        outR = ladder (lad[1], oscR, g, G, k);
+    }
+
+    // The oscillator, at one phase and one phase increment.
+    float oscillator (float t, float fdt) const
+    {
+        if (wave == Wave::Saw)
+            return 2.0f * t - 1.0f - polyBlep (t, fdt);
+
+        // A square is a 50% pulse; PULSE just narrows it. Narrowing costs
+        // fundamental — a pulse's fundamental follows sin(pi * width) — and
+        // brings in the even harmonics a square has none of. That trade is
+        // the thinner, reedier tone, and it hands the ladder a denser set of
+        // partials to sweep through.
+        const float width = wave == Wave::Pulse ? pulseWidth : 0.5f;
+
+        float osc = (t < width ? 1.0f : -1.0f);
+        osc += polyBlep (t, fdt);
+        osc -= polyBlep (std::fmod (t + 1.0f - width, 1.0f), fdt);
+
+        // Any width but 50% leaves the wave sitting off centre by its own
+        // mean. Left in, the amp envelope would sweep that DC into a click at
+        // every note edge and it would push the ladder's tanh permanently to
+        // one side, so it comes straight back off. At 50% this is a no-op.
+        osc -= 2.0f * width - 1.0f;
+        return osc;
+    }
+
+    // One channel's ladder, and everything after it. The state is per channel;
+    // every coefficient and envelope reaching it is shared.
+    float ladder (Ladder& l, float osc, float g, float G, float k)
+    {
+        const float S = (G * G * G * l.s1 + G * G * l.s2 + G * l.s3 + l.s4) / (1.0f + g);
         float u = (osc - k * S) / (1.0f + k * G * G * G * G);
         u = std::tanh (u);
-        float y = stage (stage (stage (stage (u, s1, G), s2, G), s3, G), s4, G);
+        float y = stage (stage (stage (stage (u, l.s1, G), l.s2, G), l.s3, G), l.s4, G);
         y *= 1.0f + 0.5f * k;   // keep loudness roughly constant as resonance rises
 
         // Accent also punches the volume
@@ -270,9 +384,9 @@ private:
         // amp envelope would sweep that into a thump at every note edge, and it
         // eats headroom the rest of the time, so it comes off here — after the
         // filter, which is where it appears.
-        dcY1 = out - dcX1 + dcCoef * dcY1;
-        dcX1 = out;
-        return dcY1;
+        l.dcY1 = out - l.dcX1 + dcCoef * l.dcY1;
+        l.dcX1 = out;
+        return l.dcY1;
     }
 
     static float polyBlep (float t, float dt)
@@ -296,8 +410,7 @@ private:
     static constexpr float pulseWidth = 0.25f;
 
     double sampleRate = 44100.0;
-    float dcCoef = 0.9993f;      // DC blocker on the voice output
-    float dcX1 = 0.0f, dcY1 = 0.0f;
+    float dcCoef = 0.9993f;      // DC blocker on the voice output, per channel
 
     Wave  wave = Wave::Saw;
     float tuning = 0.0f;
@@ -319,7 +432,14 @@ private:
     float vibSpeed = 5.0f;   // Hz
     float vibDepth = 0.0f;   // semitones (0 = vibrato off)
 
-    double phase = 0.0;
+    // Unison. One oscillator, no detune and dead centre until setUnison says
+    // otherwise, so an untouched voice is the 303 it always was.
+    int    unisonVoices = 1;
+    float  uniNorm = 1.0f;
+    double uniPhase[maxUnison] = {};
+    float  uniRatio[maxUnison] = { 1.0f };            // frequency multiplier
+    float  uniL[maxUnison] = { 1.0f }, uniR[maxUnison] = { 1.0f };
+
     double vibPhase = 0.0;
     float currentFreq = 110.0f, targetFreq = 110.0f;
     float glideCoef = 0.001f, attackCoef = 0.01f, releaseCoef = 0.005f, accSmoothCoef = 0.002f;
@@ -327,7 +447,7 @@ private:
     float env = 0.0f, accEnv = 0.0f, accEnvSmoothed = 0.0f, amp = 0.0f;
     float envPeak = 1.0f, envRise = 0.0f;   // filter-envelope attack ramp
     bool  envRising = false;
-    float s1 = 0, s2 = 0, s3 = 0, s4 = 0;
+    Ladder lad[2];
     bool  gate = false;
 
     std::vector<int> heldNotes;

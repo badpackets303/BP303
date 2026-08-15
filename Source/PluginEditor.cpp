@@ -370,6 +370,36 @@ void Look303::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h,
     const int hot = (int) slider.getProperties().getWithDefault ("hotEnd", 0);
     const Accent accent { p.orange.getHue(), p.orange.getSaturation(),
                           p.orange.getBrightness() };
+
+    // --- where the XY pad has taken this knob --------------------------------
+    // The knob turns to what is actually being heard: the pointer, the LED
+    // collar, the value ring and the cap's highlight all read the modulated
+    // position, because a control being played should look like it is being
+    // played. Taken here, before anything derives an angle from it, so every
+    // skin follows without knowing the pad exists.
+    //
+    // The pad only offsets the parameter, so the setting underneath survives —
+    // it is kept visible as a dim tick out in the margin at the position the
+    // user left it, with a thin arc from there to where the pad has pushed it.
+    // Without that the knob would look like it had been turned, and on release
+    // it would appear to jump back on its own.
+    const float padOffset = (float) slider.getProperties().getWithDefault ("padOffset", 0.0f);
+    const float basePos   = sliderPos;
+    const bool  padMoved  = std::abs (padOffset) > 1.0e-3f;
+
+    if (padMoved)
+        sliderPos = juce::jlimit (0.0f, 1.0f, sliderPos + padOffset);
+
+    // Where the value readout grows from. A bipolar control — a pan — reads out
+    // from its centre detent rather than from the bottom of its travel: filling
+    // from the left edge would show a pan sitting dead centre as a ring half
+    // full of something, which is the one thing it is not.
+    const bool  bipolar   = (bool) slider.getProperties().getWithDefault ("bipolar", false);
+    const float originPos = bipolar ? 0.5f : 0.0f;
+    const float originAngle = startAngle + originPos * (endAngle - startAngle);
+    // distance from the origin, 0..1 — what the colour ramp follows, so hard
+    // left and hard right read as equally far out rather than one reading as low
+    const float valuePos = bipolar ? std::abs (sliderPos - 0.5f) * 2.0f : sliderPos;
     // how far the cap's lighting has drifted round with the knob
     const float lightAngle = (startAngle + sliderPos * (endAngle - startAngle))
                                  * highlightFollow;
@@ -380,6 +410,28 @@ void Look303::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h,
     const float angle = startAngle + sliderPos * (endAngle - startAngle);
     const float body = radius * 0.74f;
     juce::Rectangle<float> bodyRect (centre.x - body, centre.y - body, body * 2, body * 2);
+
+    // The marker for where the user left it, and the run from there to where the
+    // pad has taken it. Both sit in the 3px the bounds were reduced by, outside
+    // the notch collar and outside KnobArcRing's value ring, so they are drawn
+    // once here instead of once inside each per-skin branch below.
+    if (padMoved)
+    {
+        const float baseAngle = startAngle + basePos * (endAngle - startAngle);
+        const float ringR     = radius + 1.5f;
+
+        juce::Path arc;
+        arc.addCentredArc (centre.x, centre.y, ringR, ringR, 0.0f,
+                           juce::jmin (baseAngle, angle), juce::jmax (baseAngle, angle), true);
+        g.setColour (p.orange.withAlpha (0.55f));
+        g.strokePath (arc, juce::PathStrokeType (1.6f, juce::PathStrokeType::curved,
+                                                 juce::PathStrokeType::butt));
+
+        const float bs = std::sin (baseAngle), bc = std::cos (baseAngle);
+        g.setColour (p.text.withAlpha (0.8f));
+        g.drawLine (centre.x + bs * (radius - 0.5f), centre.y - bc * (radius - 0.5f),
+                    centre.x + bs * (radius + 2.8f), centre.y - bc * (radius + 2.8f), 1.8f);
+    }
 
     // Where the cap's highlight sits, swung part of the way round with the knob.
     auto litFrom = [&] (float ox, float oy)
@@ -401,7 +453,20 @@ void Look303::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h,
         {
             const float tt = (float) i / (float) (nTicks - 1);
             const float a  = startAngle + tt * (endAngle - startAngle);
-            const bool  lit = a <= angle + 1.0e-3f;
+            // Bipolar lights the span between the centre and the pointer, either
+            // side of it; unipolar lights everything up to the pointer.
+            //
+            // The pointer end is rounded outward by half a tick. Eleven ticks is
+            // only five a side once the collar reads from the centre, and without
+            // this a pan of -0.15 lit exactly the one tick a centred pan does —
+            // the two knobs were indistinguishable except by pointer angle. Half
+            // a tick of slack means any pan worth calling one shows as off
+            // centre, and dead centre still shows as the single centre tick.
+            const float slack = 0.5f / (float) (nTicks - 1);
+            const bool  lit = bipolar
+                ? (tt >= std::min (originPos, sliderPos - slack) - 1.0e-3f
+                   && tt <= std::max (originPos, sliderPos + slack) + 1.0e-3f)
+                : a <= angle + 1.0e-3f;
             const float s = std::sin (a), c = std::cos (a);
             // Each tick is tinted for its own place on the dial, not for where
             // the knob currently sits, so the collar is a ramp that turning
@@ -411,9 +476,10 @@ void Look303::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h,
             // colour. On a mark this small the hue change alone is almost
             // invisible, and it would carry nothing at all to someone who reads
             // the two hues as the same — the size change does the work.
+            const float tint  = bipolar ? std::abs (tt - 0.5f) * 2.0f : tt;
             const float warn  = lit ? hotAmount (tt, hot) : 0.0f;
             const float inner = ri - warn * (ro - ri) * 0.55f;
-            g.setColour (lit ? valueTint (accent, tt, hot) : p.tickArc.withAlpha (0.7f));
+            g.setColour (lit ? valueTint (accent, tint, hot) : p.tickArc.withAlpha (0.7f));
             g.drawLine (centre.x + s * inner, centre.y - c * inner,
                         centre.x + s * ro, centre.y - c * ro,
                         lit ? 1.7f + warn * 1.4f : 1.2f);
@@ -434,12 +500,17 @@ void Look303::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h,
         g.setColour (p.tickArc);
         g.strokePath (track, stroke);
 
-        if (angle > startAngle + 1.0e-3f)
+        // The lit span runs from the origin to the pointer, which for a bipolar
+        // control means it can run anticlockwise. Ordered here so the arcs below
+        // are always drawn low angle to high.
+        const float lo = juce::jmin (originAngle, angle);
+        const float hi = juce::jmax (originAngle, angle);
+
+        if (hi > lo + 1.0e-3f)
         {
             juce::Path value;
-            value.addCentredArc (centre.x, centre.y, ringR, ringR, 0.0f,
-                                 startAngle, angle, true);
-            g.setColour (valueTint (accent, sliderPos, hot).withAlpha (0.28f));
+            value.addCentredArc (centre.x, centre.y, ringR, ringR, 0.0f, lo, hi, true);
+            g.setColour (valueTint (accent, valuePos, hot).withAlpha (0.28f));
             g.strokePath (value, juce::PathStrokeType (thick + 3.0f,
                                                        juce::PathStrokeType::curved,
                                                        juce::PathStrokeType::butt));
@@ -448,18 +519,24 @@ void Look303::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h,
             // ramp round the ring is laid down as a short run of arcs. They
             // overlap by a hair; drawn exactly end to end the joins read as
             // notches in the ring.
+            //
+            // The ramp always runs outward from the origin, so on a bipolar
+            // control it is mirrored when the pointer sits left of centre.
             constexpr int segments = 12;
-            const float span = angle - startAngle;
+            const float span = hi - lo;
+            const bool  reversed = angle < originAngle;
             for (int i = 0; i < segments; ++i)
             {
-                const float a0 = startAngle + span * (float) i / (float) segments;
-                const float a1 = juce::jmin (angle,
-                                             startAngle + span * (float) (i + 1)
-                                                 / (float) segments + 0.015f);
+                const float a0 = lo + span * (float) i / (float) segments;
+                const float a1 = juce::jmin (hi, lo + span * (float) (i + 1)
+                                                     / (float) segments + 0.015f);
                 juce::Path seg;
                 seg.addCentredArc (centre.x, centre.y, ringR, ringR, 0.0f, a0, a1, true);
-                g.setColour (valueTint (accent, sliderPos * ((float) i + 0.5f)
-                                                   / (float) segments, hot));
+
+                const float along = ((float) i + 0.5f) / (float) segments;
+                g.setColour (valueTint (accent,
+                                        valuePos * (reversed ? 1.0f - along : along),
+                                        hot));
                 g.strokePath (seg, stroke);
             }
         }
@@ -889,12 +966,27 @@ juce::Rectangle<int> FxSection::contentArea() const
     return getLocalBounds().withTrimmedTop (titleH + tabH + 2).withTrimmedBottom (4);
 }
 
+juce::Rectangle<int> FxSection::tabBarFreeArea() const
+{
+    const int used = juce::roundToInt (tabSegmentWidth() * (float) tabs.size());
+    return tabBarArea().withTrimmedLeft (used);
+}
+
 void FxSection::showTab (int i)
 {
-    current = juce::jlimit (0, (int) pages.size() - 1, i);
+    // Tabs and pages are one-to-one on every FX panel, but not on the pad, whose
+    // tabs pick a mode and whose content is the same pad either way. Clamp
+    // against the tabs — they are what the bar draws and what onTabChanged
+    // reports — and let the page index saturate, so one page stays showing
+    // whichever tab is chosen.
+    current = juce::jlimit (0, juce::jmax (0, tabs.size() - 1), i);
+    const int shown = juce::jmin (current, (int) pages.size() - 1);
     for (int k = 0; k < (int) pages.size(); ++k)
-        pages[(size_t) k]->setVisible (k == current);
+        pages[(size_t) k]->setVisible (k == shown);
     repaint();
+
+    if (onTabChanged)
+        onTabChanged (current);
 }
 
 void FxSection::resized()
@@ -1016,7 +1108,8 @@ StepGrid::View StepGrid::liveView() const
 {
     View v;
     v.playing = proc.sequencer.playingStep.load();
-    v.length  = proc.sequencer.length.load();
+    v.length  = proc.sequencer.lengthOf (proc.sequencer.length.load());
+    v.fit     = proc.sequencer.patternFit.load();
     v.cursor  = cursor;
     v.kbLow   = kbLow;
 
@@ -1030,6 +1123,7 @@ StepGrid::View StepGrid::liveView() const
         mix ((juce::uint64) s.key.load());
         mix ((juce::uint64) (s.octave.load() + 8));
         mix ((juce::uint64) s.hold.load());
+        mix ((juce::uint64) s.ratchet.load());
         mix ((juce::uint64) ((s.gate.load()  ? 1 : 0)
                            | (s.slide.load() ? 4 : 0)));
         mix ((juce::uint64) (s.dyn.load() + 2));
@@ -1045,6 +1139,18 @@ juce::Rectangle<int> StepGrid::ledCellBounds (int col) const
 
     const int cellW = (getWidth() - labelW) / 16;
     return { labelW + col * cellW, 0, cellW, ledH };
+}
+
+// The bar at the pattern's end. It lives on the LED row rather than spanning the
+// grid because the four rows below it are all editable cells — a full-height
+// handle would sit on top of a gate, a pitch, an accent and a slide, and steal a
+// click from whichever the pointer was actually aiming at.
+juce::Rectangle<int> StepGrid::patternEndHandle (int len) const
+{
+    const int cellW = (getWidth() - labelW) / 16;
+    const int x = juce::jlimit (labelW, getWidth() - handleW,
+                                labelW + len * cellW - handleW / 2);
+    return { x, 0, handleW, ledH };
 }
 
 void StepGrid::repaintLed (int col)
@@ -1080,7 +1186,9 @@ void StepGrid::paint (juce::Graphics& g)
     const auto& p = ui303::palette (proc.uiSkin.load());
     const int cellW = (getWidth() - labelW) / 16;
     const int playing = proc.sequencer.playingStep.load();
-    const int len = proc.sequencer.length.load();
+    const int barLen = proc.sequencer.length.load();
+    const int len = proc.sequencer.lengthOf (barLen);
+    const bool fit = proc.sequencer.patternFit.load();
 
     // Which columns a held note (hold > 1) owns, computed the same greedy way the
     // sequencer plays them: a gated head covers the next hold-1 columns, and a
@@ -1204,6 +1312,18 @@ void StepGrid::paint (juce::Graphics& g)
             drawToggleCell (cell (rows[1].y, rows[1].h), gateOn, p.red);
         }
 
+        // A split gate is sliced into the number of times it fires, cut out of
+        // the lit cell rather than drawn over it — the same mark the drum grid
+        // uses for the same thing, because they are the same thing.
+        if (const int count = proc.sequencer.ratchetAt (col); count > 1)
+        {
+            auto r = cell (rows[1].y, rows[1].h);
+            g.setColour (p.cellOff.withAlpha (0.9f * dim));
+            for (int cut = 1; cut < count; ++cut)
+                g.fillRect (r.getX() + r.getWidth() * (float) cut / (float) count - 0.8f,
+                            r.getY(), 1.6f, r.getHeight());
+        }
+
         // pitch cell
         auto pr = cell (rows[2].y, rows[2].h);
         g.setColour (p.pitchBg.withAlpha (dim));
@@ -1229,6 +1349,30 @@ void StepGrid::paint (juce::Graphics& g)
             g.setColour (p.text.withAlpha (0.25f));
             g.drawVerticalLine (cx, 0.0f, (float) kbTop);
         }
+    }
+
+    // A fitted line's steps don't sit on the columns they are drawn in, so its
+    // real step boundaries go in as ticks down the grid — the same mark a fitted
+    // drum lane carries, for the same reason.
+    if (fit)
+    {
+        const double stepW = (double) cellW * (double) barLen / (double) len;
+        g.setColour (p.text.withAlpha (0.4f));
+        for (int i = 1; i < len; ++i)
+            g.fillRect ((float) labelW + (float) (i * stepW) - 0.5f,
+                        (float) ledH, 1.0f, (float) (kbTop - ledH));
+    }
+
+    // The line's end. Drawn whatever the length, not only on a shortened line: a
+    // control you cannot see until after you have used it teaches nobody it
+    // exists, and full length is exactly where you reach to shorten it. The
+    // title colour once fitted, as the drum lanes' handles are, since then it is
+    // setting how many steps divide the bar rather than where the line stops.
+    if (const auto handle = patternEndHandle (len); clip.intersects (handle))
+    {
+        g.setColour (fit ? p.title.withAlpha (0.9f)
+                         : p.orange.withAlpha (len < barLen ? 0.85f : 0.3f));
+        g.fillRect (handle);
     }
 
     // --- on-screen keyboard ---
@@ -1342,7 +1486,9 @@ int StepGrid::keyAt (juce::Point<int> pos) const
 
 void StepGrid::advanceCursor()
 {
-    const int len = juce::jlimit (1, 16, proc.sequencer.length.load());
+    // The line's own length, not the bar: the cursor writes steps, and steps
+    // past the line's end are ones it never plays.
+    const int len = proc.sequencer.lengthOf (juce::jlimit (1, 16, proc.sequencer.length.load()));
     cursor = (cursor + 1) % len;
 }
 
@@ -1400,6 +1546,31 @@ void StepGrid::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
+    // A press on the line's end grabs it instead of moving the cursor. Checked
+    // before the column, and against a hit zone a few pixels wide, so the
+    // boundary stays reachable without the LEDs either side of it going.
+    //
+    // This sets how many steps the *line* runs, not the bar — LENGTH still owns
+    // the bar, and dragging here no longer drags every drum lane with it.
+    {
+        const int barLen = juce::jlimit (1, 16, proc.sequencer.length.load());
+        const int len = proc.sequencer.lengthOf (barLen);
+        if (y < ledH && patternEndHandle (len).expanded (2, 0).contains (e.getPosition()))
+        {
+            if (e.mods.isRightButtonDown())
+            {
+                proc.sequencer.patternLength.store (Sequencer303::followBar);
+                proc.sequencer.patternFit.store (false);
+            }
+            else
+            {
+                draggingLength = true;
+            }
+            repaint();
+            return;
+        }
+    }
+
     const int col = columnAt (e.x);
     if (col < 0)
         return;
@@ -1412,9 +1583,22 @@ void StepGrid::mouseDown (const juce::MouseEvent& e)
     }
     else if (y < ledH + gateH)
     {
-        // Defer the on/off toggle to mouseUp: a horizontal drag from here sets the
-        // note's length instead (see mouseDrag / mouseUp).
-        gateDragCol = col;
+        // Alt walks how many times the gate fires inside its own step, the same
+        // "click walks the ring" idiom the drum grid's ratchets use. Checked
+        // before the on/off toggle, which is deferred to mouseUp — otherwise
+        // splitting a gate would first have to survive a length drag.
+        if (e.mods.isAltDown())
+        {
+            const int count = proc.sequencer.ratchetAt (col);
+            step.gate.store (true);   // asking for repeats on a rest can only mean one thing
+            step.ratchet.store (count % Sequencer303::maxRatchet + 1);
+        }
+        else
+        {
+            // Defer the on/off toggle to mouseUp: a horizontal drag from here sets
+            // the note's length instead (see mouseDrag / mouseUp).
+            gateDragCol = col;
+        }
     }
     else if (y < ledH + gateH + pitchH)
     {
@@ -1477,6 +1661,26 @@ void StepGrid::endLatchedNote()
     proc.releaseHeldKey();
 }
 
+// Double-clicking the line's end switches it between running on the sixteenth
+// grid and being fitted across the bar — the same gesture, in the same place, as
+// a drum lane's.
+void StepGrid::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    if (e.y >= ledH)
+        return;
+
+    const int barLen = juce::jlimit (1, 16, proc.sequencer.length.load());
+    const int len = proc.sequencer.lengthOf (barLen);
+    if (! patternEndHandle (len).expanded (2, 0).contains (e.getPosition()))
+        return;
+
+    // The press that opened the double-click armed a length drag; dropped here
+    // so the release doesn't leave the end grabbed.
+    draggingLength = false;
+    proc.sequencer.patternFit.store (! proc.sequencer.patternFit.load());
+    repaint();
+}
+
 void StepGrid::mouseDrag (const juce::MouseEvent& e)
 {
     // Sliding onto another key while holding starts that note instead, so a run
@@ -1486,6 +1690,21 @@ void StepGrid::mouseDrag (const juce::MouseEvent& e)
         if (e.y >= kbTop && e.x >= labelW)
             if (const int k = keyAt ({ e.x, e.y }); k != noKey && k != latchNote)
                 startLatchedNote (k);
+        return;
+    }
+
+    // Length drag: rounded to the nearest boundary rather than to the column the
+    // pointer is over, so the end lands where it is drawn. One step is the
+    // shortest a pattern can be, as the LENGTH control's own floor is.
+    if (draggingLength)
+    {
+        const int cellW = (getWidth() - labelW) / 16;
+        if (cellW > 0)
+        {
+            proc.sequencer.patternLength.store (
+                juce::jlimit (1, 16, (e.x - labelW + cellW / 2) / cellW));
+            repaint();
+        }
         return;
     }
 
@@ -1501,7 +1720,7 @@ void StepGrid::mouseDrag (const juce::MouseEvent& e)
                 head.gate.store (true);   // dragging implies a note here
                 gateDragMoved = true;
             }
-            const int len = juce::jlimit (1, 16, proc.sequencer.length.load());
+            const int len = proc.sequencer.lengthOf (juce::jlimit (1, 16, proc.sequencer.length.load()));
             const int maxRun = juce::jmax (1, len - gateDragCol);   // don't cross the loop end
             head.hold.store (juce::jlimit (1, maxRun, col - gateDragCol + 1));
             repaint();
@@ -1523,12 +1742,18 @@ void StepGrid::mouseUp (const juce::MouseEvent&)
     // happens to land.
     endLatchedNote();
 
+    draggingLength = false;
+
     // A plain click on the GATE row (no drag) toggles the note on/off.
     if (gateDragCol >= 0 && ! gateDragMoved)
     {
         auto& step = proc.sequencer.steps[gateDragCol];
         step.gate.store (! step.gate.load());
         step.hold.store (1);
+        // and back to a single hit, the way the length resets: a step that gets
+        // its gate back later should come back plain rather than as whatever
+        // split it happened to be carrying before
+        step.ratchet.store (1);
     }
     gateDragCol = -1;
     gateDragMoved = false;
@@ -1542,8 +1767,7 @@ void StepGrid::mouseUp (const juce::MouseEvent&)
 DrumGrid::View DrumGrid::liveView() const
 {
     View v;
-    v.playing = proc.drumSequencer.playingStep.load();
-    // The length still comes from the bass pattern, which owns it.
+    // The master length still comes from the bass pattern, which owns the bar.
     v.length  = proc.sequencer.length.load();
 
     juce::uint64 h = 1469598103934665603ull;
@@ -1551,26 +1775,45 @@ DrumGrid::View DrumGrid::liveView() const
 
     for (int lane = 0; lane < DrumSequencer::numLanes; ++lane)
     {
+        v.playing[lane] = proc.drumSequencer.lanePlayingStep[lane].load();
+        v.laneLen[lane] = proc.drumSequencer.lengthOf (lane, v.length);
+        v.fit[lane] = proc.drumSequencer.laneFit[lane].load();
         mix (proc.drumSequencer.stepMask[lane].load());
         mix (proc.drumSequencer.accentMask[lane].load());
         mix (proc.drumSequencer.softMask[lane].load());
+        mix (proc.drumSequencer.ratchetMask[lane].load());
     }
     v.pattern = h;
     return v;
 }
 
-juce::Rectangle<int> DrumGrid::playheadCellBounds (int col) const
+juce::Rectangle<int> DrumGrid::playheadCellBounds (int lane, int col) const
 {
-    if (col < 0 || col > 15)
+    if (col < 0 || col > 15 || lane < 0 || lane >= DrumSequencer::numLanes)
         return {};
 
     const int cellW = (getWidth() - labelW) / 16;
-    return { labelW + col * cellW, 0, cellW, getHeight() / DrumSequencer::numLanes };
+    const int rowH = getHeight() / DrumSequencer::numLanes;
+    return { labelW + col * cellW, lane * rowH, cellW, rowH };
 }
 
-void DrumGrid::repaintPlayhead (int col)
+// The bar at a lane's end, sitting on the boundary between the last step it
+// plays and the first it doesn't. Narrow, because it has to be grabbable without
+// stealing presses from the cell either side of it.
+juce::Rectangle<int> DrumGrid::laneEndHandle (int lane, int len) const
 {
-    if (const auto r = playheadCellBounds (col); ! r.isEmpty())
+    const int cellW = (getWidth() - labelW) / 16;
+    const int rowH = getHeight() / DrumSequencer::numLanes;
+    // Clamped into the component, so a lane running the full sixteen still shows
+    // its handle rather than having it half cut off against the right edge.
+    const int x = juce::jlimit (labelW, getWidth() - handleW,
+                                labelW + len * cellW - handleW / 2);
+    return { x, lane * rowH + 2, handleW, rowH - 4 };
+}
+
+void DrumGrid::repaintPlayhead (int lane, int col)
+{
+    if (const auto r = playheadCellBounds (lane, col); ! r.isEmpty())
         repaint (r);
 }
 
@@ -1582,9 +1825,15 @@ void DrumGrid::timerCallback()
 
     if (now.sameApartFromPlayhead (shown))
     {
-        // Only the marker on the top lane moves.
-        repaintPlayhead (shown.playing);
-        repaintPlayhead (now.playing);
+        // Only the markers moved. Ten small rects at worst, and on the common
+        // case of every lane following the master they are the same column.
+        for (int lane = 0; lane < DrumSequencer::numLanes; ++lane)
+        {
+            if (now.playing[lane] == shown.playing[lane])
+                continue;
+            repaintPlayhead (lane, shown.playing[lane]);
+            repaintPlayhead (lane, now.playing[lane]);
+        }
         return;
     }
 
@@ -1599,9 +1848,10 @@ void DrumGrid::paint (juce::Graphics& g)
     const int cellW = (getWidth() - labelW) / 16;
     const int rowH = getHeight() / DrumSequencer::numLanes;
     // The drum line has its own enable, so the playhead comes from the drum
-    // sequencer; the length still comes from the bass pattern, which owns it.
-    const int playing = proc.drumSequencer.playingStep.load();
-    const int len = proc.sequencer.length.load();
+    // sequencer; the master length still comes from the bass pattern, which owns
+    // the bar. Each lane may run shorter, and then it has its own end and its own
+    // position in it.
+    const int masterLen = proc.sequencer.length.load();
     static const char* laneNames[] = { "BD", "SD", "CP", "CH", "OH" };
 
     g.setFont (juce::FontOptions (10.0f, juce::Font::bold));
@@ -1617,6 +1867,8 @@ void DrumGrid::paint (juce::Graphics& g)
             continue;
 
         const uint32_t mask = proc.drumSequencer.stepMask[lane].load();
+        const int len = proc.drumSequencer.lengthOf (lane, masterLen);
+        const int playing = proc.drumSequencer.lanePlayingStep[lane].load();
 
         if (clip.getX() < labelW)
         {
@@ -1661,11 +1913,59 @@ void DrumGrid::paint (juce::Graphics& g)
                 g.drawRoundedRectangle (cell, 3.0f, 0.8f);
             }
 
-            if (col == playing && lane == 0)
+            // A ratcheted step is sliced into the number of times it fires, cut
+            // out of the lit cell rather than drawn over it — the count has to be
+            // countable at a glance, and at four slices in a cell this size a
+            // added mark would just read as texture.
+            if (const int ratchet = proc.drumSequencer.ratchetAt (lane, col); ratchet > 1)
+            {
+                g.setColour (p.cellOff.withAlpha (0.9f * dim));
+                for (int cut = 1; cut < ratchet; ++cut)
+                    g.fillRect (cell.getX() + cell.getWidth() * (float) cut / (float) ratchet - 0.8f,
+                                cell.getY(), 1.6f, cell.getHeight());
+            }
+
+            // A marker per lane rather than one on the top row: with lanes of
+            // different lengths there is no single column that says where the
+            // kit is, and a marker sitting over a cell six lanes away from the
+            // one actually firing is worse than none.
+            if (col == playing)
             {
                 g.setColour ((p.retro ? p.title : p.text).withAlpha (0.6f));
                 g.drawRoundedRectangle (cell, 3.0f, 1.5f);
             }
+        }
+
+        // The lane's end, drawn as a grabbable edge. Drawn on every lane, not
+        // only on shortened ones: a control you cannot see until after you have
+        // used it teaches nobody it exists, and a lane following the master is
+        // exactly where you reach to shorten it. Dim while following, lit once
+        // the lane has an end of its own.
+        // A fitted lane's steps don't sit on the columns they are drawn in — the
+        // grid is a sixteen-cell editor whatever clock the lane runs on — so the
+        // real boundaries go in as ticks across the row. Without them the only
+        // thing on screen saying a lane is fitted is the colour of its handle,
+        // and "three cells" would read as three sixteenths rather than as the
+        // bar cut in three.
+        if (proc.drumSequencer.laneFit[lane].load())
+        {
+            const double stepW = (double) cellW * (double) masterLen / (double) len;
+            g.setColour (p.text.withAlpha (0.4f));
+            for (int i = 1; i < len; ++i)
+                g.fillRect ((float) labelW + (float) (i * stepW) - 0.5f,
+                            (float) cy + 1.0f, 1.0f, (float) rowH - 2.0f);
+        }
+
+        if (const auto handle = laneEndHandle (lane, len); clip.intersects (handle))
+        {
+            // Lit orange for a lane that has an end of its own, dim while it
+            // follows the master — and the title colour once it is fitted, since
+            // then the handle is setting how many steps divide the bar rather
+            // than where the lane stops.
+            const bool fit = proc.drumSequencer.laneFit[lane].load();
+            g.setColour (fit ? p.title.withAlpha (0.9f)
+                             : p.orange.withAlpha (len < masterLen ? 0.85f : 0.3f));
+            g.fillRect (handle);
         }
     }
 
@@ -1691,6 +1991,9 @@ void DrumGrid::applyPaint (int lane, int col)
         case Paint::SetHit:   steps.fetch_or (1u << col); break;
         case Paint::ClearHit: proc.drumSequencer.clearStep (lane, col); break;
         case Paint::SetLevel: proc.drumSequencer.setDynAt (lane, col, paintDyn); break;
+        case Paint::SetRatchet:
+            proc.drumSequencer.setRatchetAt (lane, col, paintRatchet); break;
+        case Paint::DragLength:
         case Paint::None:     break;
     }
 }
@@ -1705,13 +2008,54 @@ void DrumGrid::mouseDown (const juce::MouseEvent& e)
     const int col = juce::jlimit (0, 15, (e.x - labelW) / cellW);
     const int lane = juce::jlimit (0, DrumSequencer::numLanes - 1, e.y / rowH);
 
+    // A press on the lane's end grabs it instead of painting. Checked first, and
+    // against a hit zone a few pixels wide, so the boundary is reachable without
+    // making the two cells either side of it hard to click.
+    {
+        const int len = proc.drumSequencer.lengthOf (lane, proc.sequencer.length.load());
+        if (laneEndHandle (lane, len).expanded (2, 0).contains (e.getPosition()))
+        {
+            // Right-click puts the lane back on the master. Dragging back to the
+            // master length would be the other way to spell it, but then a lane
+            // could never be pinned at a length that happens to equal the bar.
+            if (e.mods.isRightButtonDown())
+            {
+                proc.drumSequencer.laneLength[lane].store (DrumSequencer::followMaster);
+                // Its clock as well as its length: a lane fitted to the bar in
+                // as many steps as the bar has is the identity case, so leaving
+                // FIT set would only show as a handle coloured for a mode the
+                // lane is no longer meaningfully in.
+                proc.drumSequencer.laneFit[lane].store (false);
+                paintMode = Paint::None;
+            }
+            else
+            {
+                paintMode = Paint::DragLength;
+                paintLane = lane;
+            }
+            repaint();
+            return;
+        }
+    }
+
     // The pressed cell decides the operation; a drag then repeats it across cells.
     // Left button owns whether there is a hit at all; right (or shift) owns how
     // hard it lands, cycling normal -> accent -> soft the same way the bass ACC
     // row does. An empty cell right-clicks straight to an accent, as it always
     // has — the level ring never turns a hit off, that stays the left button's
     // job.
-    if (e.mods.isRightButtonDown() || e.mods.isShiftDown())
+    // Alt owns how many times the step fires, cycling 1 -> 2 -> 3 -> 4 -> 1, the
+    // same "click walks the ring" idiom the level uses. Checked before the level,
+    // since alt-shift would otherwise land on whichever was tested first.
+    if (e.mods.isAltDown())
+    {
+        const int count = proc.drumSequencer.ratchetAt (lane, col);
+        paintRatchet = proc.drumSequencer.hasHit (lane, col)
+                           ? count % DrumSequencer::maxRatchet + 1
+                           : 2;   // an empty step alt-clicks straight to a double
+        paintMode = Paint::SetRatchet;
+    }
+    else if (e.mods.isRightButtonDown() || e.mods.isShiftDown())
     {
         // indexed by dyn + 1: entry 0 is Soft, 1 is Normal, 2 is Hard
         static constexpr int next[] = { dyn303::Normal, dyn303::Hard, dyn303::Soft };
@@ -1730,16 +2074,722 @@ void DrumGrid::mouseDown (const juce::MouseEvent& e)
     repaint();
 }
 
+// Double-clicking a lane's end switches it between running on the sixteenth
+// grid and being fitted across the bar. It lives on the handle because the two
+// controls are one idea — the end says how many steps, FIT says what they are
+// spread over — and putting it anywhere else would make a lane's timing depend
+// on a control nowhere near it.
+void DrumGrid::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    const int rowH = getHeight() / DrumSequencer::numLanes;
+    if (rowH <= 0)
+        return;
+
+    const int lane = juce::jlimit (0, DrumSequencer::numLanes - 1, e.y / rowH);
+    const int len = proc.drumSequencer.lengthOf (lane, proc.sequencer.length.load());
+    if (! laneEndHandle (lane, len).expanded (2, 0).contains (e.getPosition()))
+        return;
+
+    // The press that opened the double-click armed a length drag; dropped here
+    // so the release doesn't leave the lane grabbed.
+    paintMode = Paint::None;
+    proc.drumSequencer.laneFit[lane].store (! proc.drumSequencer.laneFit[lane].load());
+    repaint();
+}
+
 void DrumGrid::mouseDrag (const juce::MouseEvent& e)
 {
     const int cellW = (getWidth() - labelW) / 16;
-    if (paintMode == Paint::None || paintLane < 0 || cellW <= 0 || e.x < labelW)
+    if (paintMode == Paint::None || paintLane < 0 || cellW <= 0)
+        return;
+
+    if (paintMode == Paint::DragLength)
+    {
+        // Rounded to the nearest boundary rather than to the cell the pointer is
+        // over, so the end lands where the bar is drawn and a drag doesn't feel
+        // half a cell behind the cursor. One step is the shortest a lane can be.
+        const int len = juce::jlimit (1, 16, (e.x - labelW + cellW / 2) / cellW);
+        proc.drumSequencer.laneLength[paintLane].store (len);
+        repaint();
+        return;
+    }
+
+    if (e.x < labelW)
         return;
 
     // Locked to the lane the drag began in, so a diagonal drag stays on one voice.
     const int col = juce::jlimit (0, 15, (e.x - labelW) / cellW);
     applyPaint (paintLane, col);
     repaint();
+}
+
+//==============================================================================
+// EqBands
+
+EqBands::EqBands (BP303AudioProcessor& p, int lineIndex) : proc (p), line (lineIndex)
+{
+    const char* const* ids = BP303AudioProcessor::eqBandIds (line);
+
+    for (int b = 0; b < GraphicEq::numBands; ++b)
+    {
+        gain[b] = proc.apvts.getRawParameterValue (ids[b]);
+
+        // An attachment rather than a listener, so a node moved by automation
+        // or a preset load redraws too.
+        if (auto* param = proc.apvts.getParameter (ids[b]))
+            att[b] = std::make_unique<juce::ParameterAttachment> (
+                *param, [this] (float) { curveValid = false; repaint(); }, nullptr);
+    }
+
+    startTimerHz (25);
+}
+
+void EqBands::resized()
+{
+    curveValid = false;
+}
+
+juce::Rectangle<int> EqBands::plotArea() const
+{
+    return getLocalBounds().withTrimmedLeft (axisW).withTrimmedBottom (labelH);
+}
+
+float EqBands::freqToX (float hz) const
+{
+    const auto r = plotArea();
+    const float t = (std::log10 (juce::jmax (1.0f, hz)) - std::log10 (loHz))
+                  / (std::log10 (hiHz) - std::log10 (loHz));
+    return (float) r.getX() + (float) r.getWidth() * juce::jlimit (0.0f, 1.0f, t);
+}
+
+float EqBands::gainToY (float db) const
+{
+    const auto r = plotArea();
+    const float t = (juce::jlimit (-plotRangeDb, plotRangeDb, db) + plotRangeDb)
+                  / (2.0f * plotRangeDb);
+    return (float) r.getBottom() - (float) r.getHeight() * t;
+}
+
+float EqBands::yToGain (float y) const
+{
+    const auto r = plotArea();
+    if (r.getHeight() <= 0)
+        return 0.0f;
+
+    const float t = ((float) r.getBottom() - y) / (float) r.getHeight();
+    return juce::jlimit (-GraphicEq::maxGainDb, GraphicEq::maxGainDb,
+                         t * 2.0f * plotRangeDb - plotRangeDb);
+}
+
+// The strip a band's meter column occupies: exactly the octave the band covers,
+// which is what makes the columns tile the axis without overlapping.
+juce::Rectangle<int> EqBands::bandStrip (int b) const
+{
+    const auto r = plotArea();
+    const float half = 1.4142135f;
+    const int x0 = juce::roundToInt (freqToX (GraphicEq::centreHz[b] / half));
+    const int x1 = juce::roundToInt (freqToX (GraphicEq::centreHz[b] * half));
+    return { x0, r.getY(), juce::jmax (1, x1 - x0), r.getHeight() };
+}
+
+int EqBands::nearestBand (int x) const
+{
+    int best = 0;
+    float bestD = 1.0e9f;
+    for (int b = 0; b < GraphicEq::numBands; ++b)
+    {
+        const float d = std::abs (freqToX (GraphicEq::centreHz[b]) - (float) x);
+        if (d < bestD)
+        {
+            bestD = d;
+            best = b;
+        }
+    }
+    return best;
+}
+
+void EqBands::ensureCurve()
+{
+    float now[GraphicEq::numBands];
+    bool changed = ! curveValid;
+    for (int b = 0; b < GraphicEq::numBands; ++b)
+    {
+        now[b] = gain[b] != nullptr ? gain[b]->load() : 0.0f;
+        if (now[b] != curveBuiltFrom[b])
+            changed = true;
+    }
+
+    if (! changed)
+        return;
+
+    std::copy (std::begin (now), std::end (now), std::begin (curveBuiltFrom));
+    curveValid = true;
+
+    const auto r = plotArea();
+    curve.clear();
+    if (r.getWidth() <= 1 || r.getHeight() <= 1)
+        return;
+
+    // One sample every two pixels. The response is smooth at octave Q, so
+    // finer than that buys nothing a 54px-tall plot could show.
+    const double sr = proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0;
+    const int steps = juce::jmax (2, r.getWidth() / 2);
+    const float logLo = std::log10 (loHz), logHi = std::log10 (hiHz);
+
+    for (int i = 0; i <= steps; ++i)
+    {
+        const float t  = (float) i / (float) steps;
+        const float hz = std::pow (10.0f, logLo + t * (logHi - logLo));
+        const float x  = (float) r.getX() + (float) r.getWidth() * t;
+        const float y  = gainToY (GraphicEq::responseDb (now, hz, sr));
+
+        if (i == 0)
+            curve.startNewSubPath (x, y);
+        else
+            curve.lineTo (x, y);
+    }
+
+}
+
+void EqBands::paint (juce::Graphics& g)
+{
+    ensureCurve();
+
+    const auto& p = ui303::palette (proc.uiSkin.load());
+    const auto r = plotArea();
+    if (r.getWidth() <= 1 || r.getHeight() <= 1)
+        return;
+
+    const auto clip = g.getClipBounds();
+
+    g.setColour (p.cellOff.darker (0.5f));
+    g.fillRect (r);
+
+    // --- the meters: one column an octave wide, behind everything -----------
+    for (int b = 0; b < GraphicEq::numBands; ++b)
+    {
+        const auto strip = bandStrip (b);
+        if (! clip.intersects (strip))
+            continue;
+
+        const int lit = juce::roundToInt (proc.eqBandLevel (line, b)
+                                          * (float) strip.getHeight());
+        if (lit > 0)
+        {
+            g.setColour (p.red.withAlpha (0.22f));
+            g.fillRect (strip.reduced (1, 0).removeFromBottom (lit));
+        }
+    }
+
+    // --- grid ---------------------------------------------------------------
+    g.setFont (juce::FontOptions (8.0f));
+    for (int db = -12; db <= 12; db += 6)
+    {
+        const float y = gainToY ((float) db);
+        g.setColour (db == 0 ? p.outline : p.outline.withAlpha (0.45f));
+        g.drawLine ((float) r.getX(), y, (float) r.getRight(), y, 1.0f);
+
+        g.setColour (p.text.withAlpha (0.55f));
+        g.drawText (db > 0 ? "+" + juce::String (db) : juce::String (db),
+                    0, juce::roundToInt (y) - 6, axisW - 3, 12,
+                    juce::Justification::centredRight);
+    }
+
+    // --- the response curve --------------------------------------------------
+    // Stroke only. A filled curve reads well on its own, but the spectrum
+    // already owns the fill here, and two translucent washes of the same
+    // colour make it impossible to tell which one you are looking at.
+    g.setColour (p.red);
+    g.strokePath (curve, juce::PathStrokeType (1.6f));
+
+    // --- nodes and their frequency labels ------------------------------------
+    g.setFont (juce::FontOptions (8.0f, juce::Font::bold));
+    static const char* labels[GraphicEq::numBands] = {
+        "31", "63", "125", "250", "500", "1K", "2K", "4K", "8K", "16K"
+    };
+
+    for (int b = 0; b < GraphicEq::numBands; ++b)
+    {
+        const float db = gain[b] != nullptr ? gain[b]->load() : 0.0f;
+        const float x = freqToX (GraphicEq::centreHz[b]);
+        const float y = gainToY (db);
+        const bool live = (b == dragBand || b == hoverBand);
+
+        // A tick down to the axis, so a node that happens to sit on the 0 dB
+        // line is still findable as a band rather than as part of the grid.
+        g.setColour (p.outline.withAlpha (live ? 0.9f : 0.35f));
+        g.drawLine (x, y, x, (float) r.getBottom(), 1.0f);
+
+        const float rad = live ? (float) nodeR + 1.0f : (float) nodeR;
+        g.setColour (p.panel1);
+        g.fillEllipse (x - rad, y - rad, rad * 2.0f, rad * 2.0f);
+        g.setColour (live ? p.orange : p.red);
+        g.drawEllipse (x - rad, y - rad, rad * 2.0f, rad * 2.0f, 1.6f);
+
+        g.setColour (live ? p.text : p.text.withAlpha (0.7f));
+        g.drawText (labels[b], juce::roundToInt (x) - 20, getHeight() - labelH,
+                    40, labelH, juce::Justification::centred);
+    }
+}
+
+void EqBands::timerCallback()
+{
+    if (getWidth() <= axisW || getHeight() <= labelH)
+        return;
+
+    int moved[GraphicEq::numBands];
+    int numMoved = 0;
+
+    for (int b = 0; b < GraphicEq::numBands; ++b)
+    {
+        const auto strip = bandStrip (b);
+        const int lit = juce::roundToInt (proc.eqBandLevel (line, b)
+                                          * (float) strip.getHeight());
+        if (lit == shownMeter[b])
+            continue;
+
+        shownMeter[b] = lit;
+        moved[numMoved++] = b;
+    }
+
+    if (numMoved == 0)
+        return;
+
+    // Repainting a strip re-strokes the whole response path under a narrow
+    // clip, so a strip is not a tenth of the plot's cost — it is a third of it.
+    // Measured: ten strips are 1.08 ms against 0.32 ms for the plot in one go.
+    // With anything playing most bands move every frame, so past a few of them
+    // the single repaint is the cheaper answer, and below that the strips still
+    // save the quiet bands from costing anything at all.
+    if (numMoved > 3)
+    {
+        repaint (plotArea());
+        return;
+    }
+
+    for (int i = 0; i < numMoved; ++i)
+        repaint (bandStrip (moved[i]));
+}
+
+void EqBands::setReadout (int band)
+{
+    if (! onReadout)
+        return;
+
+    if (band < 0)
+    {
+        onReadout ({});
+        return;
+    }
+
+    const float hz = GraphicEq::centreHz[band];
+    const float db = gain[band] != nullptr ? gain[band]->load() : 0.0f;
+    onReadout ((hz >= 1000.0f ? juce::String (hz / 1000.0f, 0) + "kHz"
+                              : juce::String (juce::roundToInt (hz)) + "Hz")
+               + " " + (db >= 0.0f ? "+" : "") + juce::String (db, 1) + " dB");
+}
+
+void EqBands::writeBand (int band, const juce::MouseEvent& e)
+{
+    if (att[band] == nullptr)
+        return;
+
+    // Shift is the fine pass: the plot is 54px over 28 dB, so a pixel is half
+    // a dB — enough to shape with, not enough to match two bands by eye.
+    const float db = e.mods.isShiftDown()
+                   ? dragStartGain + (yToGain ((float) e.y)
+                                      - yToGain ((float) dragStartY)) * 0.25f
+                   : yToGain ((float) e.y);
+
+    att[band]->setValueAsPartOfGesture (
+        juce::jlimit (-GraphicEq::maxGainDb, GraphicEq::maxGainDb, db));
+
+    setReadout (band);
+}
+
+void EqBands::mouseDown (const juce::MouseEvent& e)
+{
+    dragBand = nearestBand (e.x);
+    dragStartY = e.y;
+    dragStartGain = gain[dragBand] != nullptr ? gain[dragBand]->load() : 0.0f;
+
+    if (att[dragBand] != nullptr)
+        att[dragBand]->beginGesture();
+
+    writeBand (dragBand, e);
+    repaint();
+}
+
+void EqBands::mouseDrag (const juce::MouseEvent& e)
+{
+    if (dragBand < 0)
+        return;
+
+    // Deliberately *not* handed over when the pointer crosses into the next
+    // band. A node is at a fixed frequency, so a drag that wandered sideways
+    // would drop the band you grabbed and start bending its neighbour — which
+    // on a curve, unlike on a fader bank, is nothing like what you asked for.
+    writeBand (dragBand, e);
+}
+
+void EqBands::mouseUp (const juce::MouseEvent&)
+{
+    if (dragBand >= 0 && att[dragBand] != nullptr)
+        att[dragBand]->endGesture();
+
+    dragBand = -1;
+    repaint();
+}
+
+void EqBands::mouseMove (const juce::MouseEvent& e)
+{
+    const int b = nearestBand (e.x);
+    if (b == hoverBand)
+        return;
+
+    hoverBand = b;
+    setReadout (b);
+    repaint();
+}
+
+void EqBands::mouseExit (const juce::MouseEvent&)
+{
+    if (dragBand >= 0)
+        return;
+
+    hoverBand = -1;
+    setReadout (-1);
+    repaint();
+}
+
+void EqBands::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    const int b = nearestBand (e.x);
+    if (att[b] != nullptr)
+        att[b]->setValueAsCompleteGesture (0.0f);
+}
+
+void EqBands::flatten()
+{
+    for (auto& a : att)
+        if (a != nullptr)
+            a->setValueAsCompleteGesture (0.0f);
+}
+
+//==============================================================================
+// XyPad
+
+XyPad::XyPad (BP303AudioProcessor& p) : proc (p)
+{
+    xVal  = proc.apvts.getRawParameterValue ("padx");
+    yVal  = proc.apvts.getRawParameterValue ("pady");
+    onVal = proc.apvts.getRawParameterValue ("padon");
+
+    // Attachments rather than listeners, for the same reason the EQ's nodes use
+    // them: a pad moved by automation or by a preset load has to redraw too.
+    const auto redraw = [this] (float) { repaint(); };
+    if (auto* param = proc.apvts.getParameter ("padx"))    xAtt    = std::make_unique<juce::ParameterAttachment> (*param, redraw, nullptr);
+    if (auto* param = proc.apvts.getParameter ("pady"))    yAtt    = std::make_unique<juce::ParameterAttachment> (*param, redraw, nullptr);
+    if (auto* param = proc.apvts.getParameter ("padon"))   onAtt   = std::make_unique<juce::ParameterAttachment> (*param, redraw, nullptr);
+    if (auto* param = proc.apvts.getParameter ("padmode")) modeAtt = std::make_unique<juce::ParameterAttachment> (*param, redraw, nullptr);
+
+    startTimerHz (25);
+}
+
+juce::Rectangle<int> XyPad::padArea() const
+{
+    // Square, and as tall as the section's content allows. The readout column
+    // takes what is left, which is what the 300px section width was chosen to
+    // leave room for.
+    auto r = getLocalBounds().reduced (margin);
+    return r.removeFromLeft (r.getHeight());
+}
+
+void XyPad::writeAxes (const juce::MouseEvent& e)
+{
+    const auto r = padArea();
+    if (r.getWidth() <= 1 || r.getHeight() <= 1)
+        return;
+
+    const auto norm = [] (float v, float lo, float len)
+    {
+        return juce::jlimit (-1.0f, 1.0f, (v - lo) / juce::jmax (1.0f, len) * 2.0f - 1.0f);
+    };
+
+    // Y is inverted: up the pad is more of whatever the axis is, which is the
+    // direction every other control in the plugin moves in.
+    const float nx =  norm ((float) e.x, (float) r.getX(), (float) r.getWidth());
+    const float ny = -norm ((float) e.y, (float) r.getY(), (float) r.getHeight());
+
+    if (xAtt != nullptr) xAtt->setValueAsPartOfGesture (nx);
+    if (yAtt != nullptr) yAtt->setValueAsPartOfGesture (ny);
+}
+
+void XyPad::setHeld (bool held)
+{
+    if (onAtt != nullptr)
+        onAtt->setValueAsCompleteGesture (held ? 1.0f : 0.0f);
+}
+
+void XyPad::mouseDown (const juce::MouseEvent& e)
+{
+    if (! padArea().contains (e.getPosition()))
+        return;
+
+    dragging = true;
+
+    // HOLD before the axes: the mode's units have to be on by the time the
+    // first offset lands, or the opening instant of a gesture is inaudible.
+    setHeld (true);
+
+    if (xAtt != nullptr) xAtt->beginGesture();
+    if (yAtt != nullptr) yAtt->beginGesture();
+    writeAxes (e);
+    repaint();
+}
+
+void XyPad::mouseDrag (const juce::MouseEvent& e)
+{
+    if (dragging)
+        writeAxes (e);
+}
+
+void XyPad::mouseUp (const juce::MouseEvent&)
+{
+    if (! dragging)
+        return;
+
+    dragging = false;
+
+    const bool latched = proc.apvts.getRawParameterValue ("padlatch")->load() >= 0.5f;
+
+    if (xAtt != nullptr) xAtt->endGesture();
+    if (yAtt != nullptr) yAtt->endGesture();
+
+    if (! latched)
+    {
+        // The spring back to centre is its own complete gesture rather than the
+        // tail of the drag, so a host recording automation writes the return as
+        // a deliberate move. Dropping HOLD alone would leave the axes parked at
+        // the edge and the next touch would jump the sound there before the
+        // pointer had moved.
+        if (xAtt != nullptr) xAtt->setValueAsCompleteGesture (0.0f);
+        if (yAtt != nullptr) yAtt->setValueAsCompleteGesture (0.0f);
+        setHeld (false);
+    }
+
+    repaint();
+}
+
+void XyPad::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    if (! padArea().contains (e.getPosition()))
+        return;
+
+    // The way out of a latched gesture without having to find the centre by
+    // hand — the same role FLAT plays on the EQ.
+    if (xAtt != nullptr) xAtt->setValueAsCompleteGesture (0.0f);
+    if (yAtt != nullptr) yAtt->setValueAsCompleteGesture (0.0f);
+    setHeld (false);
+    repaint();
+}
+
+void XyPad::spawnSparks (juce::Point<float> at, float speed)
+{
+    // Faster gestures throw more. Capped well below maxSparks per tick so a
+    // flick across the pad leaves a trail rather than one dense clump.
+    const int wanted = juce::jlimit (0, 5, juce::roundToInt (speed * 0.5f));
+
+    for (int made = 0; made < wanted; ++made)
+    {
+        Spark* slot = nullptr;
+        for (auto& s : sparks)
+            if (s.life <= 0.0f) { slot = &s; break; }
+
+        if (slot == nullptr)
+            return;   // all in flight; the burst is already as dense as it gets
+
+        const float ang = sparkRng.nextFloat() * juce::MathConstants<float>::twoPi;
+        const float spd = 0.6f + sparkRng.nextFloat() * 1.5f;
+
+        slot->x  = at.x + (sparkRng.nextFloat() - 0.5f) * 6.0f;
+        slot->y  = at.y + (sparkRng.nextFloat() - 0.5f) * 6.0f;
+        slot->vx = std::cos (ang) * spd;
+        slot->vy = std::sin (ang) * spd;
+        slot->life = 0.75f + sparkRng.nextFloat() * 0.25f;
+        slot->size = 1.2f + sparkRng.nextFloat() * 1.8f;
+    }
+}
+
+bool XyPad::advanceSparks()
+{
+    bool alive = false;
+
+    for (auto& s : sparks)
+    {
+        if (s.life <= 0.0f)
+            continue;
+
+        s.x += s.vx;
+        s.y += s.vy;
+        // Drag plus a little rise, so a burst reads as a puff lifting off the
+        // handle rather than as debris thrown at the walls.
+        s.vx *= 0.90f;
+        s.vy = s.vy * 0.90f - 0.05f;
+        s.life -= 0.06f;
+        alive = true;
+    }
+
+    return alive;
+}
+
+void XyPad::timerCallback()
+{
+    const auto r = padArea();
+    if (r.getWidth() <= 1 || xVal == nullptr || yVal == nullptr)
+        return;
+
+    // The knobs the pad is pushing track it from here, rather than from the
+    // mouse, so a pad driven by automation moves them too.
+    //
+    // While it is held they are refreshed every tick even if the pad has not
+    // moved: the user can turn a knob under a parked gesture, and the offset is
+    // clamped against wherever that knob now sits, so it is not a function of
+    // the pad alone. The listeners early-out on an unchanged offset, so a still
+    // pad costs twelve comparisons a frame and no repaint.
+    const float nx = xVal->load(), ny = yVal->load();
+    const bool  held = onVal != nullptr && onVal->load() >= 0.5f;
+    const bool  axesMoved = (nx != lastX || ny != lastY || held != lastHeld);
+
+    if (onPadMoved != nullptr && (held || axesMoved))
+        onPadMoved();
+
+    lastX = nx;
+    lastY = ny;
+    lastHeld = held;
+
+    const int px = r.getX() + juce::roundToInt ((nx * 0.5f + 0.5f) * (float) r.getWidth());
+    const int py = r.getBottom() - juce::roundToInt ((ny * 0.5f + 0.5f) * (float) r.getHeight());
+
+    // Sparks come off how far the handle actually travelled on screen, so a
+    // fast automation ramp throws the same burst a fast drag does, and a
+    // sub-pixel crawl throws none.
+    if (held && shownX >= 0)
+    {
+        const float dx = (float) (px - shownX), dy = (float) (py - shownY);
+        spawnSparks ({ (float) px, (float) py }, std::sqrt (dx * dx + dy * dy));
+    }
+
+    const bool sparksAlive = advanceSparks();
+    const bool handleMoved = (px != shownX || py != shownY);
+
+    shownX = px;
+    shownY = py;
+
+    // A moved handle changes the readout column too, so that is the whole
+    // component. Sparks on their own are only ever inside the square, and they
+    // are what keeps the frame going after the gesture has stopped moving until
+    // the last one has faded.
+    if (axesMoved || handleMoved)
+        repaint();
+    else if (sparksAlive)
+        repaint (r);
+}
+
+void XyPad::paint (juce::Graphics& g)
+{
+    const auto& p = ui303::palette (proc.uiSkin.load());
+    const auto r = padArea();
+    if (r.getWidth() <= 1 || r.getHeight() <= 1)
+        return;
+
+    const bool held = onVal != nullptr && onVal->load() >= 0.5f;
+    const float x = xVal != nullptr ? xVal->load() : 0.0f;
+    const float y = yVal != nullptr ? yVal->load() : 0.0f;
+
+    const int mode = proc.apvts.getRawParameterValue ("padmode") != nullptr
+                   ? (int) proc.apvts.getRawParameterValue ("padmode")->load()
+                   : macropad::Acid;
+    const auto& spec = macropad::spec (mode);
+
+    // --- the pad itself ------------------------------------------------------
+    g.setColour (p.cellOff.darker (0.5f));
+    g.fillRect (r);
+
+    g.setColour (p.outline.withAlpha (0.45f));
+    g.drawLine ((float) r.getCentreX(), (float) r.getY(),
+                (float) r.getCentreX(), (float) r.getBottom(), 1.0f);
+    g.drawLine ((float) r.getX(), (float) r.getCentreY(),
+                (float) r.getRight(), (float) r.getCentreY(), 1.0f);
+
+    g.setColour (p.outline.withAlpha (0.7f));
+    g.drawRect (r, 1);
+
+    const float hx = (float) r.getX() + (x * 0.5f + 0.5f) * (float) r.getWidth();
+    const float hy = (float) r.getBottom() - (y * 0.5f + 0.5f) * (float) r.getHeight();
+
+    // Crosshairs out to the edges, so the two axis values can be read off the
+    // pad at a glance instead of only from the numbers beside it.
+    g.setColour ((held ? p.orange : p.outline).withAlpha (held ? 0.35f : 0.25f));
+    g.drawLine (hx, (float) r.getY(), hx, (float) r.getBottom(), 1.0f);
+    g.drawLine ((float) r.getX(), hy, (float) r.getRight(), hy, 1.0f);
+
+    // Sparks, under the handle so the handle always reads clearly through them.
+    // Clipped to the square: they are thrown outward and would otherwise land in
+    // the readout column beside it.
+    {
+        juce::Graphics::ScopedSaveState clip (g);
+        g.reduceClipRegion (r);
+
+        for (const auto& s : sparks)
+        {
+            if (s.life <= 0.0f)
+                continue;
+
+            // Squared, so a spark holds its brightness most of the way and then
+            // goes quickly — a linear fade reads as a smear that never quite
+            // leaves.
+            const float a = s.life * s.life;
+            g.setColour (p.orange.withAlpha (a * 0.9f));
+            g.fillEllipse (s.x - s.size, s.y - s.size, s.size * 2.0f, s.size * 2.0f);
+        }
+    }
+
+    // Held is the state that matters: it is the difference between a pad that
+    // is colouring the sound and one that is only remembering where it was left.
+    const float rad = held ? 6.0f : 4.5f;
+    g.setColour (held ? p.orange : p.outline.withAlpha (0.8f));
+    g.fillEllipse (hx - rad, hy - rad, rad * 2.0f, rad * 2.0f);
+
+    if (held)
+    {
+        g.setColour (p.orange.withAlpha (0.45f));
+        g.drawEllipse (hx - rad * 2.2f, hy - rad * 2.2f, rad * 4.4f, rad * 4.4f, 1.5f);
+    }
+
+    // --- the readout column --------------------------------------------------
+    auto col = getLocalBounds().reduced (margin).withTrimmedLeft (r.getWidth() + 10);
+    if (col.getWidth() < 40)
+        return;
+
+    // Percentages rather than the destination values: one axis moves up to three
+    // parameters, so there is no single number to print, and what the gesture is
+    // worth is how far it has been pushed.
+    const auto axis = [&] (juce::Rectangle<int> box, const juce::String& label, float v)
+    {
+        g.setColour (p.text.withAlpha (0.75f));
+        g.setFont (juce::FontOptions (10.0f, juce::Font::bold));
+        g.drawText (label, box.removeFromTop (12), juce::Justification::centredLeft);
+
+        g.setColour (held && v != 0.0f ? p.orange : p.text.withAlpha (0.55f));
+        g.setFont (juce::FontOptions (11.0f));
+        g.drawText ((v >= 0.0f ? "+" : "") + juce::String (juce::roundToInt (v * 100.0f)) + " %",
+                    box.removeFromTop (13), juce::Justification::centredLeft);
+    };
+
+    axis (col.removeFromTop (25), juce::String ("X  ") + spec.xLabel, x);
+    col.removeFromTop (4);
+    axis (col.removeFromTop (25), juce::String ("Y  ") + spec.yLabel, y);
 }
 
 //==============================================================================
@@ -2839,12 +3889,17 @@ void BP303AudioProcessorEditor::Knob::init (juce::Component& parent,
                                             juce::AudioProcessorValueTreeState& apvts,
                                             const juce::String& paramId,
                                             const juce::String& text,
-                                            int hotEnd)
+                                            int hotEnd,
+                                            bool bipolar)
 {
     parent.addAndMakeVisible (slider);
+    this->paramId = paramId;
     // The look-and-feel draws every knob through one function and has no idea
     // which parameter it is looking at, so the hot end rides along as a property.
+    // So does whether the value reads out from the centre or from the bottom,
+    // and how far the XY pad is currently pushing it.
     slider.getProperties().set ("hotEnd", hotEnd);
+    slider.getProperties().set ("bipolar", bipolar);
     att = std::make_unique<SliderAtt> (apvts, paramId, slider);
     label.setText (text, juce::dontSendNotification);
     label.setJustificationType (juce::Justification::centred);
@@ -2981,8 +4036,9 @@ BP303AudioProcessorEditor::BP303AudioProcessorEditor (BP303AudioProcessor& p)
     decay.init (content, proc.apvts, "decay", "DECAY");
     accent.init (content, proc.apvts, "accent", "ACCENT");
     volume.init (content, proc.apvts, "volume", "VOLUME");
-    vibSpeed.init (content, proc.apvts, "vibspeed", "VIB SPEED");
-    vibDepth.init (content, proc.apvts, "vibdepth", "VIB DEPTH");
+    uniVoices.init (content, proc.apvts, "unisonvoices", "VOICES");
+    uniDetune.init (content, proc.apvts, "unisondetune", "DETUNE");
+    uniSpread.init (content, proc.apvts, "unisonspread", "SPREAD");
 
     playMode.init (content, proc, proc.apvts, "playmode", "PLAY MODE");
     content.addAndMakeVisible (runButton);
@@ -3062,12 +4118,20 @@ BP303AudioProcessorEditor::BP303AudioProcessorEditor (BP303AudioProcessor& p)
         bassFx.addPage (*pg);
     content.addAndMakeVisible (bassFx);
 
-    // --- drums (tabbed): MIX / TUNE / DECAY -----------------------------------
+    // --- drums (tabbed): MIX / TUNE / DECAY / BALANCE -------------------------
     static const char* laneIds[] = { "bdlvl", "sdlvl", "cplvl", "chlvl", "ohlvl" };
     static const char* laneTexts[] = { "BD", "SD", "CP", "CH", "OH" };
     for (int i = 0; i < 5; ++i)
         laneKnobs[i].init (drumMixPage, proc.apvts, laneIds[i], laneTexts[i]);
     drumVol.init (drumMixPage, proc.apvts, "drumvol", "DRUM VOL");
+
+    // The pans and the SPREAD that scales them belong together, so SPREAD sits
+    // here rather than on MIX with the levels.
+    static const char* panIds[] = { "bdpan", "sdpan", "cppan", "chpan", "ohpan" };
+    for (int i = 0; i < 5; ++i)
+        panKnobs[i].init (drumBalancePage, proc.apvts, panIds[i], laneTexts[i],
+                          ui303::HotNone, true);
+    drumSpread.init (drumBalancePage, proc.apvts, "drumspread", "SPREAD");
 
     bdTune.init (drumTunePage, proc.apvts, "bdtune", "BD TUNE");
     sdTune.init (drumTunePage, proc.apvts, "sdtune", "SD TUNE");
@@ -3079,7 +4143,7 @@ BP303AudioProcessorEditor::BP303AudioProcessorEditor (BP303AudioProcessor& p)
     chDecay.init (drumDecayPage, proc.apvts, "chdecay", "CH DECAY");
     ohDecay.init (drumDecayPage, proc.apvts, "ohdecay", "OH DECAY");
 
-    for (auto* pg : { &drumMixPage, &drumTunePage, &drumDecayPage })
+    for (auto* pg : { &drumMixPage, &drumTunePage, &drumDecayPage, &drumBalancePage })
         drums.addPage (*pg);
     content.addAndMakeVisible (drums);
 
@@ -3145,6 +4209,107 @@ BP303AudioProcessorEditor::BP303AudioProcessorEditor (BP303AudioProcessor& p)
         drumFx.addPage (*pg);
     content.addAndMakeVisible (drumFx);
 
+    // --- graphic EQ: one page a line, a response curve on each --------------
+    {
+        EqBands* bands[] = { &bassEqBands, &drumEqBands };
+        FxPage*  pages[] = { &bassEqPage, &drumEqPage };
+
+        for (int i = 0; i < 2; ++i)
+        {
+            pages[i]->addAndMakeVisible (*bands[i]);
+            bands[i]->onReadout = [this] (const juce::String& text)
+            {
+                eqReadout.setText (text, juce::dontSendNotification);
+            };
+            eqSection.addPage (*pages[i]);
+        }
+    }
+    content.addAndMakeVisible (eqSection);
+
+    // Header controls, added after the section so they sit on top of its tab
+    // bar the way KIT sits on top of the drums panel.
+    eqReadout.setJustificationType (juce::Justification::centredRight);
+    eqReadout.setFont (juce::FontOptions (10.0f));
+    eqReadout.setInterceptsMouseClicks (false, false);
+    content.addAndMakeVisible (eqReadout);
+
+    eqFlat.onClick = [this] { shownEqBands().flatten(); };
+    content.addAndMakeVisible (eqFlat);
+
+    bassEqOnAtt = std::make_unique<ButtonAtt> (proc.apvts, "beqon", bassEqOn);
+    drumEqOnAtt = std::make_unique<ButtonAtt> (proc.apvts, "deqon", drumEqOn);
+    content.addAndMakeVisible (bassEqOn);
+    content.addChildComponent (drumEqOn);
+
+    // The readout describes a node under the pointer, so it means nothing once
+    // the tab it belonged to is gone.
+    eqSection.onTabChanged = [this] (int tab)
+    {
+        bassEqOn.setVisible (tab == 0);
+        drumEqOn.setVisible (tab == 1);
+        eqReadout.setText ({}, juce::dontSendNotification);
+    };
+
+    // --- performance XY pad -------------------------------------------------
+    // One page, four tabs: the tab picks the mode, and the pad is the same
+    // component whichever mode is chosen.
+    padSection.addPage (xyPad);
+    content.addAndMakeVisible (padSection);
+
+    padLatchAtt = std::make_unique<ButtonAtt> (proc.apvts, "padlatch", padLatch);
+    content.addAndMakeVisible (padLatch);
+
+    // What the pad reaches, so each of those knobs can show how far it is being
+    // pushed. The dests come from MacroPad.h and the parameter ids from the
+    // knobs themselves, so this table cannot name an id that does not exist.
+    padKnobs = {
+        { &cutoff,          macropad::Cutoff },
+        { &resonance,       macropad::Resonance },
+        { &envmod,          macropad::EnvMod },
+        { &distDrive,       macropad::DistDrive },
+        { &distColor,       macropad::DistColor },
+        { &bassDistLows,    macropad::DistLows },
+        { &delayMix,        macropad::DelayMix },
+        { &delayFb,         macropad::DelayFb },
+        { &bassReverbMix,   macropad::RevMix },
+        { &bassReverbSize,  macropad::RevSize },
+        { &drumDrive,       macropad::DrumDrive },
+        { &drumFltCut,      macropad::DrumFltCut },
+    };
+
+    xyPad.onPadMoved = [this] { updatePadKnobs(); };
+
+    if (auto* modeParam = proc.apvts.getParameter ("padmode"))
+    {
+        padSection.onTabChanged = [this, modeParam] (int tab)
+        {
+            // Guarded: the attachment below moves the tab when the parameter
+            // changes, and writing it back from here would be a loop.
+            if ((int) modeParam->convertFrom0to1 (modeParam->getValue()) != tab)
+                padModeAtt->setValueAsCompleteGesture ((float) tab);
+        };
+
+        padModeAtt = std::make_unique<juce::ParameterAttachment> (
+            *modeParam,
+            [this] (float v)
+            {
+                padSection.setTab ((int) v);
+                // Immediately, not on the next tick: switching mode releases the
+                // knobs the old one was pushing, and leaving their arcs up for
+                // 40 ms reads as the pad still being on them.
+                updatePadKnobs();
+            },
+            nullptr);
+
+        padSection.setTab ((int) proc.apvts.getRawParameterValue ("padmode")->load());
+    }
+
+    // An editor opening onto a latched gesture has to show its arcs straight
+    // away rather than on the first timer tick — and a host that reopens the
+    // window mid-automation is exactly the case where waiting 40 ms for the
+    // knobs to catch up looks like they are not connected at all.
+    updatePadKnobs();
+
     // --- page layouts (invoked when each page is sized by its FxSection) ---
     // ACTIVE | TYPE, then three equal knob columns: LOWS plus the selected
     // type's own pair. The group is handed exactly two columns so its own split
@@ -3155,19 +4320,40 @@ BP303AudioProcessorEditor::BP303AudioProcessorEditor (BP303AudioProcessor& p)
     // Takes a vector, not an initializer_list: the list does not own its backing
     // array, so capturing one in a lambda that outlives the call leaves every
     // pointer dangling and the editor crashes on its first resize.
+    // A fixed column width rather than an even split of whatever the section is
+    // given: the section is now sized to exactly these columns so the EQ can
+    // have the rest of the row, and a fixed width also stops the four-knob pages
+    // spreading their knobs to different places than the six-knob ones.
+    // The row grew to fit the XY pad, and a knob on these pages takes its size
+    // from the page height — so left alone they would have grown with it, out of
+    // scale with every other knob in the window. The strip keeps the height it
+    // had and sits centred in what is now a taller page.
     const auto drumPageLayout = [] (std::vector<Knob*> knobs) {
         return [knobs = std::move (knobs)] (juce::Rectangle<int> r) {
-            r = r.reduced (6, 6);
+            r = r.reduced (6, 6).withSizeKeepingCentre (
+                    r.reduced (6, 6).getWidth(),
+                    juce::jmin (r.reduced (6, 6).getHeight(), drumKnobRowH));
             r.removeFromLeft (drumKitColumnW);
-            const int w = r.getWidth() / (int) knobs.size();
             for (auto* k : knobs)
-                k->setBounds (r.removeFromLeft (w).reduced (8, 0));
+                k->setBounds (r.removeFromLeft (drumKnobColumnW).reduced (6, 0));
         };
     };
     drumMixPage.layoutFn = drumPageLayout ({ &laneKnobs[0], &laneKnobs[1], &laneKnobs[2],
                                              &laneKnobs[3], &laneKnobs[4], &drumVol });
     drumTunePage.layoutFn = drumPageLayout ({ &bdTune, &sdTune, &cpTune, &hatTune });
     drumDecayPage.layoutFn = drumPageLayout ({ &bdDecay, &sdDecay, &chDecay, &ohDecay });
+    drumBalancePage.layoutFn = drumPageLayout ({ &panKnobs[0], &panKnobs[1], &panKnobs[2],
+                                                &panKnobs[3], &panKnobs[4], &drumSpread });
+
+    // The whole page is the plot — ACTIVE, FLAT and the readout are in the
+    // header. Captured as a pointer by value rather than as a reference: a
+    // lambda that captures a reference *parameter* by reference is the same
+    // trap the drum page layout above documents.
+    const auto eqPageLayout = [] (EqBands* bands) {
+        return [bands] (juce::Rectangle<int> r) { bands->setBounds (r.reduced (6, 5)); };
+    };
+    bassEqPage.layoutFn = eqPageLayout (&bassEqBands);
+    drumEqPage.layoutFn = eqPageLayout (&drumEqBands);
 
     bassDistPage.layoutFn = [this] (juce::Rectangle<int> r) {
         r = r.reduced (6, 6);
@@ -3452,6 +4638,8 @@ BP303AudioProcessorEditor::BP303AudioProcessorEditor (BP303AudioProcessor& p)
         }
     };
 
+    dragWatcher.onTick = [this] { checkDragLeftWindow(); };
+
     content.addAndMakeVisible (songDragMidi);
     songDragMidi.onDragOut = [this]
     {
@@ -3466,9 +4654,16 @@ BP303AudioProcessorEditor::BP303AudioProcessorEditor (BP303AudioProcessor& p)
             g.fillRoundedRectangle (chip.getBounds().toFloat().reduced (1.0f), 4.0f);
             g.setColour (juce::Colour (0xff2a2a26));
             g.setFont (juce::FontOptions (11.0f, juce::Font::bold));
-            g.drawText ("SONG", chip.getBounds(), juce::Justification::centred);
+            g.drawText (songMidiMode == bassOnly  ? "BASS"
+                      : songMidiMode == drumsOnly ? "DRUMS" : "SONG",
+                        chip.getBounds(), juce::Justification::centred);
         }
         startDragging (songDragDescription, &songDragMidi, juce::ScaledImage (chip), true);
+    };
+    songDragMidi.onClick = [this]
+    {
+        if (! songDragMidi.isEndingDrag())
+            showSongMidiMenu();
     };
 
     content.addAndMakeVisible (songSave);
@@ -3581,10 +4776,17 @@ BP303AudioProcessorEditor::BP303AudioProcessorEditor (BP303AudioProcessor& p)
     // host is still setting up when it rebuilds editors after an audio-device
     // change, and moving it then could send it to another screen or off the
     // visible frame. Hosts place and remember plugin windows themselves.
+
+    // Switch the EQ's band metering on for as long as this window lives.
+    proc.addEqMeterClient (1);
 }
 
 BP303AudioProcessorEditor::~BP303AudioProcessorEditor()
 {
+    // The band meters cost a bandpass pair and a follower per band per line,
+    // which is a lot of arithmetic for something nobody can see. They run only
+    // while a window is open.
+    proc.addEqMeterClient (-1);
     setLookAndFeel (nullptr);
 }
 
@@ -3647,6 +4849,21 @@ void BP303AudioProcessorEditor::startHelp()
         "LENGTH sets how many steps the pattern loops over, from 1 to 16. The drum "
         "pattern follows the bass pattern's length." });
 
+    steps.push_back ({ around ({ &uniVoices.slider, &uniDetune.slider,
+                                 &uniSpread.slider, &uniSpread.label }),
+        "Unison, and where the width comes from",
+        "VOICES stacks the bass oscillator up to seven times. DETUNE pulls the "
+        "copies apart in pitch for the thickness, and SPREAD places them across "
+        "the image - so the line gets wide without anything downstream having to "
+        "widen it.\n\n"
+        "Three things in the whole instrument make stereo and nothing else does: "
+        "this, the drum kit's per-voice positions on the DRUMS BALANCE page, and "
+        "the ping-pong delay. All three start off or centred, so an untouched "
+        "instance is dead mono and every effect leaves it that way.\n\n"
+        "On the drums, SPREAD scales the BALANCE positions rather than replacing "
+        "them: at zero the kit collapses to the centre whatever BALANCE says, and "
+        "turning it up opens the kit out to where you placed it." });
+
     steps.push_back ({ around ({ &bassFx, &drumFx }), "The effects, and the TYPE selectors",
         "Bass and drums each get their own chain - drive, delay, filter, comp, "
         "chorus and reverb - a tab at a time.\n\n"
@@ -3661,6 +4878,36 @@ void BP303AudioProcessorEditor::startHelp()
         "echo line down the middle. STEREO ping-pongs it, throwing each repeat to "
         "the opposite side - it opens a line right out without touching the dry "
         "signal, which stays centred." });
+
+    steps.push_back ({ around ({ &padSection }), "The XY pad",
+        "One gesture across several controls at once. The tab picks what the two "
+        "axes reach, and the readout beside the pad names them.\n\n"
+        "ACID is the one a 303 exists for: X opens the filter, Y rides resonance "
+        "and env mod together. GRIT is drive against how much bottom end you let "
+        "into the shaper. SPACE is delay against reverb. KIT drives and filters "
+        "the drum bus.\n\n"
+        "It offsets your knobs rather than writing them, so nothing you set gets "
+        "dragged about - the knobs turn to what you are hearing and a small mark "
+        "stays behind at the setting underneath. Let go and they come back to it.\n\n"
+        "Holding the pad switches on whatever effects the mode needs, and lets go "
+        "of them after - your own ACTIVE switches read the same as before. That is "
+        "the point of it: SPACE makes a sound on an instance with every effect "
+        "still switched off.\n\n"
+        "LATCH parks the gesture where you leave it instead of springing back. "
+        "Double-click the pad to drop a latched one. Only the pad's own two axes "
+        "reach your DAW's automation, so you get two lanes rather than a dozen." });
+
+    steps.push_back ({ around ({ &eqSection }), "The EQ",
+        "Ten octave bands a line, drawn as a response curve rather than a bank of "
+        "faders. Drag a node to move its band; double-click one to zero it, or FLAT "
+        "to zero the lot.\n\n"
+        "The curve is the reason it is worth the room. Octave bands overlap, so two "
+        "neighbours at +6 do not make two +6 bumps - they make one +10 shelf, and a "
+        "row of faders never shows you that.\n\n"
+        "The bars behind the curve are what each band is actually passing, measured "
+        "after the EQ. They only run while this window is open.\n\n"
+        "It sits last on each line, after the delay and reverb, which makes it a "
+        "channel EQ: what you dial is what leaves the line." });
 
     steps.push_back ({ around ({ &stepGrid, &bassHold }), "HOLD: play the pattern in",
         "HOLD latches on and lights up. With the sequencer running, hold a note - "
@@ -3691,7 +4938,12 @@ void BP303AudioProcessorEditor::startHelp()
         "quieter and duller, for ghost notes that sit behind the line. A third "
         "click returns it to normal, and right-click walks back the other way.\n\n"
         "SLIDE ties the step into the next one, giving the portamento that a 303 "
-        "is known for. Slide and accent together is the classic sound." });
+        "is known for. Slide and accent together is the classic sound.\n\n"
+        "Alt-click a GATE cell to split it, cycling 1 - 2 - 3 - 4. The step fires "
+        "that many times inside its own slot, so it is a roll rather than a change "
+        "of timing. Split a slid step and only the last repeat ties forward - you "
+        "get a stutter that glides out of its final note instead of one long note "
+        "with retriggers buried in it." });
 
     steps.push_back ({ around ({ &stepGrid }), "The keyboard writes notes",
         "The keyboard along the bottom is a writing tool, not just an audition "
@@ -3710,7 +4962,30 @@ void BP303AudioProcessorEditor::startHelp()
         "it drops an accent straight in.\n\n"
         "Press and drag across a lane to paint - whatever the first cell did "
         "(adding, removing, or setting a level) is applied to every step you drag "
-        "over, so you can lay in a hat pattern in one gesture." });
+        "over, so you can lay in a hat pattern in one gesture.\n\n"
+        "Alt-click sets how many times a step fires, cycling 1 - 2 - 3 - 4. A "
+        "ratcheted cell is sliced into that many pieces, so you can count them at "
+        "a glance. The repeats fill the step itself, which makes them rolls and "
+        "stutters rather than a change of meter." });
+
+    steps.push_back ({ around ({ &drumGrid, &stepGrid }), "End markers: drift, or divide",
+        "Every lane ends at the marker on its right, and so does the bass line - "
+        "the marker on the GATE row does the same three things. LENGTH still owns "
+        "the bar; these say how the line fills it.\n\n"
+        "Drag the marker to shorten the line and it free-runs against the bar. "
+        "Pull the hats in to six and they cycle every three eighths while the kick "
+        "stays in four, landing somewhere new each bar and coming back round after "
+        "three. That is polymeter: the pulse is unchanged and the line drifts.\n\n"
+        "Double-click the marker instead and the line's steps divide the bar "
+        "evenly, so it keeps the bar and changes the pulse. Three steps are three "
+        "even hits a bar; twelve are eighth-note triplets. That is polyrhythm, and "
+        "it is the opposite answer to the same question. Ticks along the row show "
+        "where the real step boundaries fall, since the cells still take a column "
+        "each.\n\n"
+        "Right-click the marker to put the line back on the bar, clock included.\n\n"
+        "Splitting a step and fitting a line stack rather than overlap: three "
+        "repeats inside a sixteenth are 48ths, while triplets are what fitting is "
+        "for. Steps past a line's end go dim but keep what you wrote on them." });
 
     steps.push_back ({ around ({ &bassKeys, &drumKeys }), "Pattern banks",
         "Three banks of nine, so 27 patterns per line. Bass and drums are separate "
@@ -3756,10 +5031,12 @@ void BP303AudioProcessorEditor::startHelp()
         "A song file carries copies of every pattern it uses, so it plays correctly "
         "even in a project whose banks hold something else. Loading a song will "
         "overwrite those pattern slots.\n\n"
-        "Drag MIDI out to your track to get the whole arrangement as one region - "
-        "repeats expanded, holds resolved, mutes applied. Bass and drums come out "
-        "together, so dropping it back on a BP303 plays the song complete. Drag a "
-        "pattern key instead when you only want one line." });
+        "Drag MIDI out to your track to get the whole arrangement - repeats "
+        "expanded, holds resolved, mutes applied. Bass and drums come out as a "
+        "track each, so the drums can land on a drum instrument.\n\n"
+        "Click MIDI to hand over just one of the two lines instead. The button "
+        "shows what is armed. Drag a pattern key when you only want one line of "
+        "one pattern." });
 
     help.setSteps (std::move (steps));
     help.start();
@@ -3826,9 +5103,18 @@ juce::MidiMessageSequence BP303AudioProcessorEditor::bassSlotSequence (int slot,
         seq.steps[i].dyn.store (dyn303::clampDyn (pat.bass[i].dyn));
         seq.steps[i].slide.store (pat.bass[i].slide);
         seq.steps[i].hold.store (juce::jlimit (1, Sequencer303::maxSteps, pat.bass[i].hold));
+        // as much the step as its pitch is — a rebuild that drops the split
+        // hands the host one note where the plugin plays four
+        seq.steps[i].ratchet.store (juce::jlimit (1, Sequencer303::maxRatchet,
+                                                  pat.bass[i].ratchet));
     }
     lengthSteps = juce::jlimit (1, Sequencer303::maxSteps, pat.length);
     seq.length.store (lengthSteps);
+    // the line's own cycle too — a rebuild that drops it renders a short line as
+    // if it filled the bar, which is not the pattern
+    seq.patternLength.store (juce::jlimit (Sequencer303::followBar, Sequencer303::maxSteps,
+                                           pat.lineLength));
+    seq.patternFit.store (pat.lineFit);
 
     return bp303::bassSequence (seq, shuffle);
 }
@@ -3840,12 +5126,19 @@ juce::MidiMessageSequence BP303AudioProcessorEditor::drumSlotSequence (int slot,
     const float shuffle = proc.apvts.getRawParameterValue ("shuffle")->load();
     const auto pat = proc.snapshotDrumPattern (slot);
 
+    // Everything the slot holds, not just the masks: a lane's length, its clock
+    // and its ratchets are as much the pattern as which steps are lit, and a
+    // rebuild that quietly drops them hands the host a region that is not what
+    // the plugin plays.
     DrumSequencer drums;
     for (int lane = 0; lane < DrumSequencer::numLanes; ++lane)
     {
         drums.stepMask[lane].store (pat.drumSteps[lane]);
         drums.accentMask[lane].store (pat.drumAccents[lane]);
         drums.softMask[lane].store (pat.drumSofts[lane]);
+        drums.ratchetMask[lane].store (pat.drumRatchets[lane]);
+        drums.laneLength[lane].store (pat.laneLength[lane]);
+        drums.laneFit[lane].store (pat.laneFit[lane]);
     }
     drums.normalise();
 
@@ -3887,17 +5180,23 @@ juce::File BP303AudioProcessorEditor::writeSlotMidiFile (bool bass, int slot)
 // mutes honoured — the same walk SongPlayer does, but over ticks rather than
 // transport phase.
 //
-// Bass and drums go into a single track rather than one each. The file is meant
-// to be dropped back onto a BP303, which reads bass on channel 1 and drums on
-// channel 10, so one region plays the arrangement complete. Dragging the pattern
-// keys still gives a line at a time when that is what you want.
+// Bass and drums go out as a track each. They used to share one, on the grounds
+// that the file drops back onto a BP303 — which reads bass on channel 1 and drums
+// on channel 10 — and plays the arrangement complete. That is the wrong shape for
+// every other target: a host places regions per track, not per channel, so both
+// lines landed on whichever single instrument the pointer was over. Splitting
+// costs the round-trip its one-drop convenience; landing the drums on a drum
+// instrument is worth more than that.
 juce::File BP303AudioProcessorEditor::writeSongMidiFile()
 {
     const int rows = proc.song.getCount();
     if (rows <= 0)
         return {};
 
-    juce::MidiMessageSequence merged;
+    const bool wantBass  = songMidiMode != drumsOnly;
+    const bool wantDrums = songMidiMode != bassOnly;
+
+    juce::MidiMessageSequence bassOut, drumOut;
     double tick = 0.0;
     int totalSteps = 0;
 
@@ -3917,6 +5216,9 @@ juce::File BP303AudioProcessorEditor::writeSongMidiFile()
         // The bass pattern owns the loop length, so it sets the row's length even
         // when the bass itself is muted. With no bass named yet there is nothing
         // to ask, so the live sequencer length stands in — as it does in locate().
+        // Built even when the mode is about to throw it away: it is the thing
+        // that reports the length, so a drums-only export has to lay out on the
+        // same grid the other modes do.
         int lengthSteps = juce::jlimit (1, Sequencer303::maxSteps,
                                         proc.sequencer.length.load());
         juce::MidiMessageSequence bassSeq;
@@ -3924,24 +5226,21 @@ juce::File BP303AudioProcessorEditor::writeSongMidiFile()
             bassSeq = bassSlotSequence (heldBass, lengthSteps);
 
         juce::MidiMessageSequence drumSeq;
-        if (heldDrum != SongPlayer::hold && ! step.drumMute)
+        if (wantDrums && heldDrum != SongPlayer::hold && ! step.drumMute)
             drumSeq = drumSlotSequence (heldDrum, lengthSteps);
 
         const int repeats = juce::jmax (1, step.repeats);
         for (int r = 0; r < repeats; ++r)
         {
-            if (heldBass != SongPlayer::hold && ! step.bassMute)
-                bp303::appendAt (merged, bassSeq, tick);
-            if (heldDrum != SongPlayer::hold && ! step.drumMute)
-                bp303::appendAt (merged, drumSeq, tick);
+            if (wantBass && heldBass != SongPlayer::hold && ! step.bassMute)
+                bp303::appendAt (bassOut, bassSeq, tick);
+            if (wantDrums && heldDrum != SongPlayer::hold && ! step.drumMute)
+                bp303::appendAt (drumOut, drumSeq, tick);
 
             tick += (double) lengthSteps * bp303::ticksPer16th;
             totalSteps += lengthSteps;
         }
     }
-
-    merged.updateMatchedPairs();
-    merged.sort();
 
     auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
                    .getChildFile ("BP303");
@@ -3951,8 +5250,40 @@ juce::File BP303AudioProcessorEditor::writeSongMidiFile()
     if (name.isEmpty())
         name = "Song";
 
-    const auto file = dir.getChildFile ("BP303 " + name + ".mid");
-    if (! bp303::writeMidiFile (file, { merged }, totalSteps))
+    // A track name is what a host labels the region with once there is more than
+    // one, so the two tracks don't both arrive called after the file.
+    const auto named = [] (juce::MidiMessageSequence s, const juce::String& trackName)
+    {
+        s.addEvent (juce::MidiMessage::textMetaEvent (3, trackName), 0.0);
+        s.updateMatchedPairs();
+        s.sort();
+        return s;
+    };
+
+    std::vector<juce::MidiMessageSequence> tracks;
+    juce::String suffix;
+
+    if (songMidiMode == splitTracks)
+    {
+        // A track with no notes in it still arrives as a region, and a silent one
+        // reads as half the drag having failed. A song with no drums in it should
+        // just hand over the bass.
+        if (bp303::hasNotes (bassOut)) tracks.push_back (named (bassOut, "BP303 Bass"));
+        if (bp303::hasNotes (drumOut)) tracks.push_back (named (drumOut, "BP303 Drums"));
+    }
+    else if (songMidiMode == bassOnly)
+    {
+        tracks.push_back (named (bassOut, "BP303 Bass"));
+        suffix = " Bass";
+    }
+    else
+    {
+        tracks.push_back (named (drumOut, "BP303 Drums"));
+        suffix = " Drums";
+    }
+
+    const auto file = dir.getChildFile ("BP303 " + name + suffix + ".mid");
+    if (! bp303::writeMidiFile (file, tracks, totalSteps))
         return {};
 
     return file;
@@ -3968,14 +5299,35 @@ bool BP303AudioProcessorEditor::shouldDropFilesWhenDraggedExternally (
     // desktop components are searched, so a gap between our own components can
     // look identical to open desktop. Accepting there would kill a drag on its
     // way to the SONG list, so the pointer has to be genuinely outside first.
-    if (getScreenBounds().contains (pointerPosition()))
+    //
+    // Refusing does *not* mean "ask again later", though, which is what this used
+    // to assume. DragAndDropContainer::checkForExternalDrag sets its
+    // hasCheckedForExternalDrag flag before it calls this and never clears it, so
+    // the offer comes exactly once per gesture: one refusal and the drag can
+    // never become a file, however far outside the window it then travels. It
+    // ends as an internal drag with no target, which JUCE dismisses by animating
+    // the chip back to the key it came from. That is the bounce-back, and it is
+    // why the export worked only when the pointer's path out of the window
+    // happened to miss every interior dead spot. The watcher below is the second
+    // chance JUCE doesn't give.
+    if (externalDragFired || getScreenBounds().contains (pointerPosition()))
         return false;
 
-    // A song drag hands over the whole arrangement; a pattern-key drag hands over
-    // one slot. Anything else that leaves the window is left as a plain internal
-    // drag that goes nowhere.
+    if (! buildDragFiles (details.description, files, canMoveFiles))
+        return false;
+
+    externalDragFired = true;   // so the watcher doesn't hand the same drag over twice
+    return true;
+}
+
+// A song drag hands over the whole arrangement; a pattern-key drag hands over one
+// slot. Anything else that leaves the window is left as a plain internal drag
+// that goes nowhere.
+bool BP303AudioProcessorEditor::buildDragFiles (const juce::var& description,
+                                                juce::StringArray& files, bool& canMoveFiles)
+{
     juce::File file;
-    if (details.description.toString() == songDragDescription)
+    if (description.toString() == songDragDescription)
     {
         file = writeSongMidiFile();
     }
@@ -3983,7 +5335,7 @@ bool BP303AudioProcessorEditor::shouldDropFilesWhenDraggedExternally (
     {
         bool bass = true;
         int slot = 0;
-        if (! SongList::parseDrag (details.description, bass, slot))
+        if (! SongList::parseDrag (description, bass, slot))
             return false;
 
         file = writeSlotMidiFile (bass, slot);
@@ -3994,6 +5346,43 @@ bool BP303AudioProcessorEditor::shouldDropFilesWhenDraggedExternally (
     files.add (file.getFullPathName());
     canMoveFiles = false;   // the host copies it, so our temp file stays put
     return true;
+}
+
+// Watches a running drag for the pointer genuinely leaving the window, and hands
+// the file over itself if JUCE's one offer was already spent inside. Polled
+// rather than driven off mouseDrag, because once startDragging has taken the
+// mouse the source component stops hearing about it.
+void BP303AudioProcessorEditor::dragOperationStarted (const juce::DragAndDropTarget::SourceDetails& details)
+{
+    draggingDescription = details.description;
+    externalDragFired = false;
+    dragWatcher.startTimerHz (30);
+}
+
+void BP303AudioProcessorEditor::dragOperationEnded (const juce::DragAndDropTarget::SourceDetails&)
+{
+    dragWatcher.stopTimer();
+    draggingDescription = juce::var();
+}
+
+void BP303AudioProcessorEditor::checkDragLeftWindow()
+{
+    if (externalDragFired || getScreenBounds().contains (pointerPosition()))
+        return;
+
+    juce::StringArray files;
+    bool canMoveFiles = false;
+    if (! buildDragFiles (draggingDescription, files, canMoveFiles))
+    {
+        // Nothing to hand over — an empty pattern, say. Stop looking rather than
+        // rebuilding the same missing file thirty times a second.
+        dragWatcher.stopTimer();
+        return;
+    }
+
+    externalDragFired = true;
+    dragWatcher.stopTimer();
+    juce::DragAndDropContainer::performExternalDragDropOfFiles (files, canMoveFiles, this);
 }
 
 void BP303AudioProcessorEditor::updateDistGroups()
@@ -4022,16 +5411,19 @@ void BP303AudioProcessorEditor::transposeBass (int semitones)
 void BP303AudioProcessorEditor::shiftBass (int direction)
 {
     auto& seq = proc.sequencer;
-    const int len = juce::jlimit (1, 16, seq.length.load());
+    // Rotates the steps the line plays, so it turns with the line's own length
+    // rather than with the bar once the two differ.
+    const int len = seq.lengthOf (juce::jlimit (1, 16, seq.length.load()));
 
-    struct StepData { int pitch; bool gate; int dyn; bool slide; int hold; };
+    struct StepData { int pitch; bool gate; int dyn; bool slide; int hold; int ratchet; };
     StepData old[16];
     for (int i = 0; i < len; ++i)
         old[i] = { Sequencer303::loadPitch (seq.steps[i]),
                    seq.steps[i].gate.load(),
                    seq.steps[i].dyn.load(),
                    seq.steps[i].slide.load(),
-                   seq.steps[i].hold.load() };
+                   seq.steps[i].hold.load(),
+                   seq.steps[i].ratchet.load() };
 
     for (int i = 0; i < len; ++i)
     {
@@ -4041,6 +5433,9 @@ void BP303AudioProcessorEditor::shiftBass (int direction)
         seq.steps[i].dyn.store (dyn303::clampDyn (src.dyn));
         seq.steps[i].slide.store (src.slide);
         seq.steps[i].hold.store (src.hold);
+        // carried with the step it belongs to, or shifting a pattern would
+        // quietly flatten every split gate in it
+        seq.steps[i].ratchet.store (src.ratchet);
     }
 }
 
@@ -4083,6 +5478,36 @@ void BP303AudioProcessorEditor::showSkinMenu()
                                 return;
                             proc.setSkinGlobally (result - 1);
                             applySkin();
+                        });
+}
+
+// The label says what you will get rather than what the button is, since the
+// mode is only visible here — the drag itself gives no chance to ask.
+void BP303AudioProcessorEditor::setSongMidiMode (int mode)
+{
+    songMidiMode = juce::jlimit ((int) splitTracks, (int) drumsOnly, mode);
+    songDragMidi.setButtonText (songMidiMode == bassOnly  ? "BASS"
+                              : songMidiMode == drumsOnly ? "DRUM" : "MIDI");
+}
+
+void BP303AudioProcessorEditor::showSongMidiMenu()
+{
+    juce::PopupMenu menu;
+    menu.addSectionHeader ("Drag song out as");
+    menu.addItem (1, "Bass + drums, separate tracks", true, songMidiMode == splitTracks);
+    menu.addItem (2, "Bass only",                     true, songMidiMode == bassOnly);
+    menu.addItem (3, "Drums only",                    true, songMidiMode == drumsOnly);
+
+    menu.setLookAndFeel (&look);
+    // Anchored at the pointer for the same reason showSkinMenu is: `content` is
+    // drawn through a scale transform, and the menu wants screen coordinates.
+    const auto pos = pointerPosition();
+    menu.showMenuAsync (juce::PopupMenu::Options()
+                            .withTargetScreenArea ({ pos.x, pos.y, 1, 1 }),
+                        [this] (int result)
+                        {
+                            if (result > 0)
+                                setSongMidiMode (result - 1);
                         });
 }
 
@@ -4171,20 +5596,20 @@ void BP303AudioProcessorEditor::paintContent (juce::Graphics& g)
 
     // row2: PERFORMANCE + BASS FX + DRUM FX (the FxSection children draw their own frames)
     auto row2 = area.removeFromTop (120);
-    panel (row2.removeFromLeft (330), "PERFORMANCE");
+    panel (row2.removeFromLeft (perfSectionW), "PERFORMANCE");
     area.removeFromTop (6);
 
-    // drum row: the DRUMS FxSection draws its own frame, like the FX panels
-    area.removeFromTop (120);
+    // drum row: DRUMS, PAD and EQ all draw their own frames, like the FX panels
+    area.removeFromTop (drumRowH);
     area.removeFromTop (6);
 
     // lower region: sequencer grids on the left, then the per-line keypads, then
     // the song arrangement down the right-hand edge
     auto lower = area;
-    auto songCol = lower.removeFromRight (280);
-    lower.removeFromRight (6);
-    auto keysCol = lower.removeFromRight (204);
-    lower.removeFromRight (6);
+    auto songCol = lower.removeFromRight (songColumnW);
+    lower.removeFromRight (panelGap);
+    auto keysCol = lower.removeFromRight (keysColumnW);
+    lower.removeFromRight (panelGap);
 
     auto bassPanel = lower.removeFromTop (205);
     lower.removeFromTop (6);
@@ -4201,6 +5626,37 @@ void BP303AudioProcessorEditor::paintContent (juce::Graphics& g)
     panel (songCol, "SONG");
 }
 
+void BP303AudioProcessorEditor::updatePadKnobs()
+{
+    // The same Pad the audio thread reads, asked the same question through the
+    // same `apply` — so the arc round a knob is the offset that is actually
+    // reaching the DSP, not a second guess at it. That includes the clamping: a
+    // knob already at the top of its travel shows no arc, because the pad is
+    // genuinely doing nothing to it.
+    const auto pad = proc.readPad();
+
+    for (const auto& pk : padKnobs)
+    {
+        float offset = 0.0f;
+
+        if (auto* param = proc.apvts.getParameter (pk.knob->paramId))
+        {
+            const float base = param->getValue();
+            offset = param->convertTo0to1 (
+                         pad.apply (pk.dest, param->convertFrom0to1 (base))) - base;
+        }
+
+        // A tenth of a degree of arc is not a thing anyone can see, and a knob
+        // whose offset has not really moved does not get to cost a repaint.
+        auto& props = pk.knob->slider.getProperties();
+        if (std::abs ((float) props.getWithDefault ("padOffset", 0.0f) - offset) < 0.002f)
+            continue;
+
+        props.set ("padOffset", offset);
+        pk.knob->slider.repaint();
+    }
+}
+
 void BP303AudioProcessorEditor::layoutContent()
 {
     auto area = content.getLocalBounds().reduced (8);
@@ -4211,17 +5667,17 @@ void BP303AudioProcessorEditor::layoutContent()
 
     // --- synth row ---
     auto synthRow = area.removeFromTop (120).reduced (10, 16);
-    const int knobW = synthRow.getWidth() / 11;
+    const int knobW = synthRow.getWidth() / 12;
     wave.setBounds (synthRow.removeFromLeft (knobW).reduced (6, 14));
     for (auto* k : { &tuning, &cutoff, &resonance, &envmod, &attack, &decay, &accent,
-                     &volume, &vibSpeed, &vibDepth })
+                     &volume, &uniVoices, &uniDetune, &uniSpread })
         k->setBounds (synthRow.removeFromLeft (knobW).reduced (4, 0));
     area.removeFromTop (6);
 
     // --- performance / dist / delay ---
     auto row2 = area.removeFromTop (120);
 
-    auto perf = row2.removeFromLeft (330).reduced (10, 16);
+    auto perf = row2.removeFromLeft (perfSectionW).reduced (10, 16);
     const int perfW = perf.getWidth() / 3;
     auto perfCol1 = perf.removeFromLeft (perfW);
     playMode.setBounds (perfCol1.removeFromTop (46).reduced (4, 2));
@@ -4234,29 +5690,76 @@ void BP303AudioProcessorEditor::layoutContent()
     shuffle.setBounds (perfCol3.removeFromTop (62).reduced (10, 0));
     lengthLabel.setBounds (perfCol3.removeFromBottom (13));
     lengthSlider.setBounds (perfCol3.reduced (2, 0));
-    row2.removeFromLeft (6);
+    row2.removeFromLeft (panelGap);
 
-    // BASS FX and DRUM FX tabbed panels share the rest of the row
-    const int fxW = (row2.getWidth() - 6) / 2;
-    bassFx.setBounds (row2.removeFromLeft (fxW));
-    row2.removeFromLeft (6);
+    // BASS FX and DRUM FX are the same width rather than a split of whatever the
+    // row has left, which is what puts DRUM FX's left edge on the keypad rule
+    // and BASS FX's right edge on the grid rule.
+    bassFx.setBounds (row2.removeFromLeft (fxSectionW));
+    row2.removeFromLeft (panelGap);
     drumFx.setBounds (row2);
     area.removeFromTop (6);
 
-    // --- drums row: the tabbed DRUMS section spans the full width ---
-    drums.setBounds (area.removeFromTop (120));
+    // --- drums row: DRUMS on the left, then the PAD, then the EQ ---
+    // DRUMS takes exactly the width its widest page needs — the page's own 6px
+    // margins, the KIT column, then six knob columns — and the static_assert
+    // beside padSectionW is what keeps those three widths landing the EQ on the
+    // keypad rule, directly under DRUM FX.
+    //
+    // The EQ gave up the width: at 784 it was drawing ten octave bands across
+    // most of the window and a ±14 dB curve through 67px, which is the wrong
+    // aspect ratio in both directions. At 490 a band is still 45px wide, and
+    // the taller row takes the curve from 2.4 px/dB to 4.
+    {
+        auto drumRow = area.removeFromTop (drumRowH);
+        const int drumsW = 12 + drumKitColumnW + 6 * drumKnobColumnW;
+        drums.setBounds (drumRow.removeFromLeft (drumsW));
+        drumRow.removeFromLeft (panelGap);
+        padSection.setBounds (drumRow.removeFromLeft (padSectionW));
+        drumRow.removeFromLeft (panelGap);
+        eqSection.setBounds (drumRow);
+
+        // LATCH goes at the foot of the pad's readout column. Measured from the
+        // section's own content area rather than from the pad child, so it does
+        // not depend on the child having been resized first.
+        auto padCol = padSection.contentArea().reduced (6);
+        padCol.removeFromLeft (padCol.getHeight() + 10);   // clear the pad square
+        padLatch.setBounds (padCol.removeFromBottom (20).withWidth (74)
+                            + padSection.getPosition());
+
+        // ACTIVE / FLAT / readout, right-aligned in the part of the EQ's tab
+        // bar the two tabs leave empty. Measured from the section's own bar so
+        // they stay put if the tab cap or the section width ever moves.
+        auto bar = eqSection.tabBarFreeArea() + eqSection.getPosition();
+        bar.removeFromRight (4);
+        auto activeBox = bar.removeFromRight (78);
+        bassEqOn.setBounds (activeBox);
+        drumEqOn.setBounds (activeBox);
+        bar.removeFromRight (6);
+        eqFlat.setBounds (bar.removeFromRight (46).reduced (0, 1));
+        bar.removeFromRight (10);
+        eqReadout.setBounds (bar.removeFromRight (juce::jmax (0, bar.getWidth())));
+    }
     // KIT sits in the column every page leaves clear. Placed after the section is
     // sized, since it is measured from the section's own content area.
-    kit.setBounds (drums.contentArea().reduced (6, 6)
-                       .removeFromLeft (drumKitColumnW).reduced (4, 8)
-                   + drums.getPosition());
+    // KIT is centred on the same strip the knobs keep, for the same reason: the
+    // taller row would otherwise stretch a three-segment switch to 94px.
+    {
+        auto kitArea = drums.contentArea().reduced (6, 6);
+        kitArea = kitArea.withSizeKeepingCentre (
+                      kitArea.getWidth(), juce::jmin (kitArea.getHeight(), drumKnobRowH));
+        kit.setBounds (kitArea.removeFromLeft (drumKitColumnW).reduced (4, 8)
+                       + drums.getPosition());
+    }
     area.removeFromTop (6);
 
     // --- lower region: grids, then the keypads, then the song arrangement ---
-    auto songCol = area.removeFromRight (280);
-    area.removeFromRight (6);
-    auto keysCol = area.removeFromRight (204);
-    area.removeFromRight (6);
+    // These two columns are the rules everything above lines up on; see the
+    // note by keysLeft.
+    auto songCol = area.removeFromRight (songColumnW);
+    area.removeFromRight (panelGap);
+    auto keysCol = area.removeFromRight (keysColumnW);
+    area.removeFromRight (panelGap);
 
     {
         auto songArea = songCol.reduced (10, 0).withTrimmedTop (24).withTrimmedBottom (10);

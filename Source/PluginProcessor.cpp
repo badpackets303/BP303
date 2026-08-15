@@ -372,7 +372,169 @@ juce::AudioProcessorValueTreeState::ParameterLayout BP303AudioProcessor::createP
         ParameterID { "attack", 1 }, "Attack",
         NormalisableRange<float> (0.0f, 500.0f, 0.0f, 0.5f), 0.0f));
 
+    // How far the kit opens out across the pair — see DrumMachine::voicePan for
+    // where each voice goes. Appended for the reason above, and defaulting to 0
+    // for the same reason ATTACK defaults to none: centred is what every project
+    // saved before this existed was mixed against.
+    layout.add (std::make_unique<AudioParameterFloat> (
+        ParameterID { "drumspread", 1 }, "Drum Spread",
+        NormalisableRange<float> (0.0f, 1.0f), 0.0f));
+
+    // Unison. An int rather than a float, so the readout is the number of
+    // oscillators and a host steps it cleanly instead of landing between two.
+    // One voice is the 303, and is what every project saved before this loads as.
+    layout.add (std::make_unique<AudioParameterInt> (
+        ParameterID { "unisonvoices", 1 }, "Unison Voices", 1, Synth303::maxUnison, 1));
+
+    // Deliberately a narrow range. Beating scales with frequency, so the detune
+    // that sounds huge on a lead is a slow lurch two octaves down: at 55 Hz even
+    // 10 cents beats at about a third of a hertz. Past roughly 25 cents a bass
+    // note stops sounding wide and starts sounding out of tune, so the knob does
+    // not go there. The skew keeps the useful few cents spread across real
+    // travel rather than bunched at the bottom.
+    layout.add (std::make_unique<AudioParameterFloat> (
+        ParameterID { "unisondetune", 1 }, "Unison Detune",
+        NormalisableRange<float> (0.0f, 25.0f, 0.0f, 0.6f), 8.0f));
+
+    layout.add (std::make_unique<AudioParameterFloat> (
+        ParameterID { "unisonspread", 1 }, "Unison Spread",
+        NormalisableRange<float> (0.0f, 1.0f), 0.6f));
+
+    // Where each drum voice sits, -1 hard left to +1 hard right. SPREAD scales
+    // these rather than replacing them, so it stays exactly the control it was:
+    // at 0 the kit is centred and at 1 it is the layout below. Defaulting to
+    // DrumMachine::voicePan is what keeps that true — a project saved before
+    // these existed loads with the same positions SPREAD was already producing.
+    {
+        const char* panIds[]   = { "bdpan", "sdpan", "cppan", "chpan", "ohpan" };
+        const char* panNames[] = { "Kick Pan", "Snare Pan", "Clap Pan",
+                                   "CH Pan", "OH Pan" };
+        for (int i = 0; i < DrumMachine::numVoices; ++i)
+            layout.add (std::make_unique<AudioParameterFloat> (
+                ParameterID { panIds[i], 1 }, panNames[i],
+                NormalisableRange<float> (-1.0f, 1.0f), DrumMachine::voicePan[i]));
+    }
+
+    // Graphic EQ, ten octave bands a line. Appended for the usual reason, and
+    // flat by default, which is the setting that costs nothing at all — see
+    // GraphicEq on why flat has to be a branch rather than a coefficient.
+    //
+    // Both lines' bands run consecutively so a host's automation list groups
+    // them, and the enable comes first in each group so it reads as a heading.
+    {
+        const char* onNames[]   = { "Bass EQ Active", "Drum EQ Active" };
+        const char* lineNames[] = { "Bass EQ ", "Drum EQ " };
+
+        for (int line = 0; line < 2; ++line)
+        {
+            layout.add (std::make_unique<AudioParameterBool> (
+                ParameterID { eqActiveId (line), 1 }, onNames[line], false));
+
+            for (int b = 0; b < GraphicEq::numBands; ++b)
+            {
+                // Named by frequency rather than by index, because "Bass EQ
+                // 250 Hz" is what a host's automation lane has to be readable
+                // as. The bottom two centres are halves, and round to the 31
+                // and 63 the panel prints.
+                const float hz = GraphicEq::centreHz[b];
+                const String label = hz >= 1000.0f
+                                   ? String (hz / 1000.0f, 0) + " kHz"
+                                   : String (roundToInt (hz)) + " Hz";
+
+                layout.add (std::make_unique<AudioParameterFloat> (
+                    ParameterID { eqBandIds (line)[b], 1 }, lineNames[line] + label,
+                    NormalisableRange<float> (-GraphicEq::maxGainDb,
+                                              GraphicEq::maxGainDb), 0.0f));
+            }
+        }
+    }
+
+    // Performance XY pad. Appended for the usual reason, and centred-and-off by
+    // default, which is the setting that costs nothing — macropad::Pad::apply
+    // hands the base value back untouched while PAD HOLD is false, so an
+    // instance that has never been touched is bit-identical to one built before
+    // the pad existed.
+    //
+    // Only the pad's own five controls reach the host. Its destinations are
+    // offsets applied on the way into the DSP, so the knobs the pad moves stay
+    // where the user left them and keep their own automation lanes.
+    layout.add (std::make_unique<AudioParameterChoice> (
+        ParameterID { "padmode", 1 }, "Pad Mode",
+        StringArray { "ACID", "GRIT", "SPACE", "KIT" }, macropad::Acid));
+
+    layout.add (std::make_unique<AudioParameterFloat> (
+        ParameterID { "padx", 1 }, "Pad X",
+        NormalisableRange<float> (-1.0f, 1.0f), 0.0f));
+
+    layout.add (std::make_unique<AudioParameterFloat> (
+        ParameterID { "pady", 1 }, "Pad Y",
+        NormalisableRange<float> (-1.0f, 1.0f), 0.0f));
+
+    // HOLD is what engages the pad, and it is a parameter rather than editor
+    // state so a host can play the pad with the window shut. LATCH only decides
+    // what the mouse does with HOLD on release, so it never reaches the audio
+    // thread at all.
+    layout.add (std::make_unique<AudioParameterBool> (
+        ParameterID { "padon", 1 }, "Pad Hold", false));
+
+    layout.add (std::make_unique<AudioParameterBool> (
+        ParameterID { "padlatch", 1 }, "Pad Latch", false));
+
     return layout;
+}
+
+macropad::Pad BP303AudioProcessor::readPad() const
+{
+    macropad::Pad pad;
+    pad.mode = (int) apvts.getRawParameterValue ("padmode")->load();
+    pad.x    = apvts.getRawParameterValue ("padx")->load();
+    pad.y    = apvts.getRawParameterValue ("pady")->load();
+    pad.on   = apvts.getRawParameterValue ("padon")->load() >= 0.5f;
+    return pad;
+}
+
+const char* const* BP303AudioProcessor::eqBandIds (int line)
+{
+    static const char* const bass[GraphicEq::numBands] = {
+        "beq1", "beq2", "beq3", "beq4", "beq5",
+        "beq6", "beq7", "beq8", "beq9", "beq10"
+    };
+    static const char* const drum[GraphicEq::numBands] = {
+        "deq1", "deq2", "deq3", "deq4", "deq5",
+        "deq6", "deq7", "deq8", "deq9", "deq10"
+    };
+
+    return line == 0 ? bass : drum;
+}
+
+const char* BP303AudioProcessor::eqActiveId (int line)
+{
+    return line == 0 ? "beqon" : "deqon";
+}
+
+bool BP303AudioProcessor::eqGains (int line, float* out) const
+{
+    const char* const* ids = eqBandIds (line);
+    for (int b = 0; b < GraphicEq::numBands; ++b)
+        out[b] = apvts.getRawParameterValue (ids[b])->load();
+
+    return apvts.getRawParameterValue (eqActiveId (line))->load() >= 0.5f;
+}
+
+float BP303AudioProcessor::eqBandLevel (int line, int band) const
+{
+    if (band < 0 || band >= GraphicEq::numBands)
+        return 0.0f;
+
+    return (line == 0 ? bassEq : drumEq).bandLevel (band);
+}
+
+void BP303AudioProcessor::addEqMeterClient (int delta)
+{
+    const int now = eqMeterClients.fetch_add (delta) + delta;
+    const bool wanted = now > 0;
+    bassEq.setMetering (wanted);
+    drumEq.setMetering (wanted);
 }
 
 Distortion::Params BP303AudioProcessor::distParams (const DistIds& ids) const
@@ -415,6 +577,8 @@ void BP303AudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     drumChorus.prepare (sampleRate);
     bassReverb.prepare (sampleRate);
     drumReverb.prepare (sampleRate);
+    bassEq.prepare (sampleRate);
+    drumEq.prepare (sampleRate);
     masterLimiter.prepare (sampleRate);
     drumBuffer.assign ((size_t) juce::jmax (1, samplesPerBlock), 0.0f);
     drumBufferR.assign ((size_t) juce::jmax (1, samplesPerBlock), 0.0f);
@@ -448,6 +612,10 @@ void BP303AudioProcessor::requestDrumPattern (int idx)
 void BP303AudioProcessor::writeBassPatXml (juce::XmlElement& pat, const BassPattern& p)
 {
     pat.setAttribute ("length", p.length);
+    // absent means followBar / the sixteenth grid, which is what the line did
+    // before it had a cycle of its own
+    pat.setAttribute ("linelen", p.lineLength);
+    pat.setAttribute ("linefit", p.lineFit);
     for (int i = 0; i < Sequencer303::maxSteps; ++i)
     {
         auto* step = pat.createNewChildElement ("STEP");
@@ -460,12 +628,17 @@ void BP303AudioProcessor::writeBassPatXml (juce::XmlElement& pat, const BassPatt
         step->setAttribute ("dyn",    p.bass[i].dyn);
         step->setAttribute ("slide",  p.bass[i].slide);
         step->setAttribute ("hold",   p.bass[i].hold);
+        // absent means one hit, which is what every gate did before it could split
+        step->setAttribute ("ratchet", p.bass[i].ratchet);
     }
 }
 
 void BP303AudioProcessor::readBassPatXml (const juce::XmlElement& pat, BassPattern& p)
 {
     p.length = juce::jlimit (1, 16, pat.getIntAttribute ("length", 16));
+    p.lineLength = juce::jlimit (Sequencer303::followBar, 16,
+                                 pat.getIntAttribute ("linelen", Sequencer303::followBar));
+    p.lineFit = pat.getBoolAttribute ("linefit", false);
     int i = 0;
     for (auto* step : pat.getChildWithTagNameIterator ("STEP"))
     {
@@ -483,6 +656,8 @@ void BP303AudioProcessor::readBassPatXml (const juce::XmlElement& pat, BassPatte
         p.bass[i].slide  = step->getBoolAttribute ("slide");
         p.bass[i].hold   = juce::jlimit (1, Sequencer303::maxSteps,
                                          step->getIntAttribute ("hold", 1));
+        p.bass[i].ratchet = juce::jlimit (1, Sequencer303::maxRatchet,
+                                          step->getIntAttribute ("ratchet", 1));
         ++i;
     }
 }
@@ -497,6 +672,12 @@ void BP303AudioProcessor::writeDrumPatXml (juce::XmlElement& pat, const DrumPatt
         // absent in files written before soft hits existed, which is exactly what
         // an all-zero mask means, so no fallback is needed on the way back in
         laneXml->setAttribute ("softs", (int) p.drumSofts[lane]);
+        // likewise: absent means followMaster, which is what every lane did
+        laneXml->setAttribute ("len", p.laneLength[lane]);
+        // and absent here means the sixteenth grid, ditto
+        laneXml->setAttribute ("fit", p.laneFit[lane]);
+        // and absent here means every step fires once, as they always did
+        laneXml->setAttribute ("ratchets", (int) p.drumRatchets[lane]);
     }
 }
 
@@ -510,6 +691,9 @@ void BP303AudioProcessor::readDrumPatXml (const juce::XmlElement& pat, DrumPatte
         p.drumSteps[lane]   = (uint32_t) laneXml->getIntAttribute ("steps");
         p.drumAccents[lane] = (uint32_t) laneXml->getIntAttribute ("accents");
         p.drumSofts[lane] = (uint32_t) laneXml->getIntAttribute ("softs");
+        p.laneLength[lane] = laneXml->getIntAttribute ("len", DrumSequencer::followMaster);
+        p.laneFit[lane] = laneXml->getBoolAttribute ("fit", false);
+        p.drumRatchets[lane] = (uint32_t) laneXml->getIntAttribute ("ratchets");
         ++lane;
     }
 }
@@ -679,8 +863,11 @@ void BP303AudioProcessor::saveBassPatternTo (BassPattern& p) const
         p.bass[i].dyn = dyn303::clampDyn (sequencer.steps[i].dyn.load());
         p.bass[i].slide  = sequencer.steps[i].slide.load();
         p.bass[i].hold   = sequencer.steps[i].hold.load();
+        p.bass[i].ratchet = sequencer.steps[i].ratchet.load();
     }
     p.length = sequencer.length.load();
+    p.lineLength = sequencer.patternLength.load();
+    p.lineFit = sequencer.patternFit.load();
 }
 
 void BP303AudioProcessor::loadBassPatternFrom (const BassPattern& p)
@@ -692,8 +879,12 @@ void BP303AudioProcessor::loadBassPatternFrom (const BassPattern& p)
         sequencer.steps[i].dyn.store (dyn303::clampDyn (p.bass[i].dyn));
         sequencer.steps[i].slide.store (p.bass[i].slide);
         sequencer.steps[i].hold.store (juce::jlimit (1, Sequencer303::maxSteps, p.bass[i].hold));
+        sequencer.steps[i].ratchet.store (juce::jlimit (1, Sequencer303::maxRatchet,
+                                                        p.bass[i].ratchet));
     }
     sequencer.length.store (p.length);
+    sequencer.patternLength.store (p.lineLength);
+    sequencer.patternFit.store (p.lineFit);
 }
 
 void BP303AudioProcessor::saveDrumPatternTo (DrumPattern& p) const
@@ -703,6 +894,9 @@ void BP303AudioProcessor::saveDrumPatternTo (DrumPattern& p) const
         p.drumSteps[lane]   = drumSequencer.stepMask[lane].load();
         p.drumAccents[lane] = drumSequencer.accentMask[lane].load();
         p.drumSofts[lane] = drumSequencer.softMask[lane].load();
+        p.laneLength[lane] = drumSequencer.laneLength[lane].load();
+        p.laneFit[lane] = drumSequencer.laneFit[lane].load();
+        p.drumRatchets[lane] = drumSequencer.ratchetMask[lane].load();
     }
 }
 
@@ -713,6 +907,9 @@ void BP303AudioProcessor::loadDrumPatternFrom (const DrumPattern& p)
         drumSequencer.stepMask[lane].store (p.drumSteps[lane]);
         drumSequencer.accentMask[lane].store (p.drumAccents[lane]);
         drumSequencer.softMask[lane].store (p.drumSofts[lane]);
+        drumSequencer.laneLength[lane].store (p.laneLength[lane]);
+        drumSequencer.laneFit[lane].store (p.laneFit[lane]);
+        drumSequencer.ratchetMask[lane].store (p.drumRatchets[lane]);
     }
     // the slot's masks came off disk, so they get the invariant applied
     drumSequencer.normalise();
@@ -809,7 +1006,10 @@ void BP303AudioProcessor::updateHoldLatch (int playingStep)
     if (latchNote < 0 || playingStep < 0)
         return;
 
-    const int len = juce::jlimit (1, Sequencer303::maxSteps, sequencer.length.load());
+    // The line's own length: HOLD writes steps, and the write head wraps where
+    // the line wraps rather than where the bar does.
+    const int len = sequencer.lengthOf (juce::jlimit (1, Sequencer303::maxSteps,
+                                                      sequencer.length.load()));
 
     if (latchHead < 0)
     {
@@ -845,7 +1045,9 @@ void BP303AudioProcessor::recordNotes (juce::MidiBuffer& midi, int numSamples,
                                        double bpm, double basePhaseBeats)
 {
     const double sr = sampleRateHz;
-    const int len = juce::jlimit (1, Sequencer303::maxSteps, sequencer.length.load());
+    // ditto: recording writes steps, so it wraps with the line.
+    const int len = sequencer.lengthOf (juce::jlimit (1, Sequencer303::maxSteps,
+                                                      sequencer.length.load()));
 
     for (const auto metadata : midi)
     {
@@ -888,10 +1090,21 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     const auto wave = static_cast<Synth303::Wave> (
         juce::jlimit (0, Synth303::numWaves - 1,
                       (int) apvts.getRawParameterValue ("wave")->load()));
+    // The pad is a displacement from the knobs, not a replacement for them, so
+    // it is read first and every destination below asks it for its own offset.
+    // Untouched it is inert: `apply` returns the base value without computing
+    // anything, so nothing here can round differently to how it did before the
+    // pad existed.
+    const auto pad = readPad();
+    const unsigned padUnits = pad.forcedUnits();
+
     const float pTuning = apvts.getRawParameterValue ("tuning")->load();
-    const float pCutoff = apvts.getRawParameterValue ("cutoff")->load();
-    const float pRes    = apvts.getRawParameterValue ("resonance")->load();
-    const float pEnvMod = apvts.getRawParameterValue ("envmod")->load();
+    const float pCutoff = pad.apply (macropad::Cutoff,
+                                     apvts.getRawParameterValue ("cutoff")->load());
+    const float pRes    = pad.apply (macropad::Resonance,
+                                     apvts.getRawParameterValue ("resonance")->load());
+    const float pEnvMod = pad.apply (macropad::EnvMod,
+                                     apvts.getRawParameterValue ("envmod")->load());
     const float pDecay  = apvts.getRawParameterValue ("decay")->load();
     const float pAccent = apvts.getRawParameterValue ("accent")->load();
     const float pVol    = apvts.getRawParameterValue ("volume")->load();
@@ -899,12 +1112,32 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     const float pVibDep = apvts.getRawParameterValue ("vibdepth")->load();
     const float pAttack = apvts.getRawParameterValue ("attack")->load();
 
+    const int   pUniVoices = (int) apvts.getRawParameterValue ("unisonvoices")->load();
+    const float pUniDetune = apvts.getRawParameterValue ("unisondetune")->load();
+    const float pUniSpread = apvts.getRawParameterValue ("unisonspread")->load();
+
     // both the sequencer voice and the live-monitor voice share the patch
     synth.setParams (wave, pTuning, pCutoff, pRes, pEnvMod, pDecay, pAccent, pVol, pVibSpd, pVibDep, pAttack);
     monitorSynth.setParams (wave, pTuning, pCutoff, pRes, pEnvMod, pDecay, pAccent, pVol, pVibSpd, pVibDep, pAttack);
+    synth.setUnison (pUniVoices, pUniDetune, pUniSpread);
+    monitorSynth.setUnison (pUniVoices, pUniDetune, pUniSpread);
 
     auto* left = buffer.getWritePointer (0);
     const int numSamples = buffer.getNumSamples();
+
+    // The bass line is a channel pair from the voice onward, not from the delay:
+    // UNISON places its oscillators across the image individually, and nothing
+    // downstream could recover that from a summed signal. With one voice the two
+    // channels are identical and the line is what it always was.
+    //
+    // The plugin only ever reports a stereo output (isBusesLayoutSupported), but
+    // a mono buffer from a host that ignores that would leave the chain writing
+    // off the end of the block, so it gets a scratch channel instead. What
+    // becomes of that channel is settled at the master stage.
+    if ((int) spareRight.size() < numSamples)
+        spareRight.resize ((size_t) numSamples);
+    auto* right = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1)
+                                              : spareRight.data();
 
     // Ext = 0, Seq = 1, Song = 2. Seq and Song both run the sequencers; only
     // Song lets the arrangement drive which patterns they play.
@@ -1140,22 +1373,27 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
         int pos = 0;
         for (const auto& e : seqEvents)
         {
-            synth.render (left + pos, e.offset - pos);
+            synth.render (left + pos, right + pos, e.offset - pos);
             pos = e.offset;
             if (e.noteOn)
                 synth.noteOn (e.note, e.dyn, e.slide);
             else
                 synth.noteOff (e.note);
         }
-        synth.render (left + pos, numSamples - pos);
+        synth.render (left + pos, right + pos, numSamples - pos);
 
         // Live-monitor voice: play the notes you press over the sequence so you
         // hear yourself while auditioning / recording. Drums already trigger
-        // live via the channel-10 path.
+        // live via the channel-10 path. It carries the same unison as the
+        // sequenced voice, so what you play sounds like what you programmed.
         if ((int) monBuffer.size() < numSamples)
             monBuffer.resize ((size_t) numSamples);
+        if ((int) monBufferR.size() < numSamples)
+            monBufferR.resize ((size_t) numSamples);
         std::fill_n (monBuffer.begin(), numSamples, 0.0f);
-        float* mbuf = monBuffer.data();
+        std::fill_n (monBufferR.begin(), numSamples, 0.0f);
+        float* mbuf  = monBuffer.data();
+        float* mbufR = monBufferR.data();
 
         int mpos = 0;
         for (const auto metadata : midi)
@@ -1164,7 +1402,7 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
             if (msg.getChannel() == 10)
                 continue;   // drums, not bass
             const int eventTime = juce::jlimit (0, numSamples, metadata.samplePosition);
-            monitorSynth.render (mbuf + mpos, eventTime - mpos);
+            monitorSynth.render (mbuf + mpos, mbufR + mpos, eventTime - mpos);
             mpos = eventTime;
             if (msg.isNoteOn())
                 monitorSynth.noteOn (msg.getNoteNumber(),
@@ -1175,8 +1413,9 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
             else if (msg.isAllNotesOff() || msg.isAllSoundOff())
                 monitorSynth.allNotesOff();
         }
-        monitorSynth.render (mbuf + mpos, numSamples - mpos);
-        juce::FloatVectorOperations::add (left, mbuf, numSamples);
+        monitorSynth.render (mbuf + mpos, mbufR + mpos, numSamples - mpos);
+        juce::FloatVectorOperations::add (left,  mbuf,  numSamples);
+        juce::FloatVectorOperations::add (right, mbufR, numSamples);
     }
     else
     {
@@ -1185,20 +1424,24 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
         {
             const auto msg = metadata.getMessage();
             const int eventTime = juce::jlimit (0, numSamples, metadata.samplePosition);
-            synth.render (left + pos, eventTime - pos);
+            synth.render (left + pos, right + pos, eventTime - pos);
             pos = eventTime;
             if (msg.getChannel() != 10)   // channel 10 is reserved for drums
                 handleMidiEvent (msg);
         }
-        synth.render (left + pos, numSamples - pos);
+        synth.render (left + pos, right + pos, numSamples - pos);
 
         // Ext mode has no monitor loop, but the step-grid keyboard can still
         // audition notes through the monitor voice.
         if ((int) monBuffer.size() < numSamples)
             monBuffer.resize ((size_t) numSamples);
+        if ((int) monBufferR.size() < numSamples)
+            monBufferR.resize ((size_t) numSamples);
         std::fill_n (monBuffer.begin(), numSamples, 0.0f);
-        monitorSynth.render (monBuffer.data(), numSamples);
-        juce::FloatVectorOperations::add (left, monBuffer.data(), numSamples);
+        std::fill_n (monBufferR.begin(), numSamples, 0.0f);
+        monitorSynth.render (monBuffer.data(), monBufferR.data(), numSamples);
+        juce::FloatVectorOperations::add (left,  monBuffer.data(),  numSamples);
+        juce::FloatVectorOperations::add (right, monBufferR.data(), numSamples);
     }
 
     // Release the audition note once its short gate elapses.
@@ -1212,38 +1455,38 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     // -> reverb. Chorus and reverb sit after the compressor so the glue works on
     // the line itself rather than pumping on its own tail.
     //
-    // Everything up to the delay is mono — one synth voice, one drive. The delay
-    // is where a line can first become stereo, so from there on the chain runs on
-    // a channel pair. None of the units after it widens anything by itself, so a
-    // MONO delay leaves the two channels identical all the way to the output and
-    // the line sounds exactly as it did before STEREO existed.
-    //
-    // The plugin only ever reports a stereo output (isBusesLayoutSupported), but
-    // a mono buffer from a host that ignores that would leave the chain writing
-    // off the end of the block, so it gets a scratch channel to discard instead.
-    if ((int) spareRight.size() < numSamples)
-        spareRight.resize ((size_t) numSamples);
-    auto* right = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1)
-                                              : spareRight.data();
-
+    // The whole chain runs on the channel pair the voice produced. None of these
+    // units widens anything by itself — a mono line stays two identical channels
+    // through all of them — so with UNISON off and a MONO delay the line is what
+    // it was before any of this was stereo.
     bassFilter.setParams (apvts.getRawParameterValue ("bflton")->load() >= 0.5f,
                           (int) apvts.getRawParameterValue ("bfltmode")->load(),
                           apvts.getRawParameterValue ("bfltcut")->load(),
                           apvts.getRawParameterValue ("bfltres")->load(),
                           apvts.getRawParameterValue ("bfltenv")->load());
-    bassFilter.process (left, numSamples);
+    bassFilter.process (left, right, numSamples);
 
-    bassDist.setParams (distParams (bassDistIds));
-    bassDist.process (left, numSamples);
+    {
+        // GRIT reaches the shaper. Its `on` is OR'd rather than written, so the
+        // pad can engage a unit for the length of a gesture without disturbing
+        // the ACTIVE switch the user set.
+        auto dp = distParams (bassDistIds);
+        dp.on       = dp.on || (padUnits & macropad::uBassDist) != 0;
+        dp.drive    = pad.apply (macropad::DistDrive, dp.drive);
+        dp.color    = pad.apply (macropad::DistColor, dp.color);
+        dp.lowsKept = pad.apply (macropad::DistLows,  dp.lowsKept);
+        bassDist.setParams (dp);
+    }
+    bassDist.process (left, right, numSamples);
 
-    // the mono line so far, mirrored into the right channel to enter the delay
-    juce::FloatVectorOperations::copy (right, left, numSamples);
-
-    fx.setParams (apvts.getRawParameterValue ("delayon")->load() >= 0.5f,
+    fx.setParams (apvts.getRawParameterValue ("delayon")->load() >= 0.5f
+                      || (padUnits & macropad::uBassDelay) != 0,
                   (int) apvts.getRawParameterValue ("delaytype")->load(),
                   (int) apvts.getRawParameterValue ("delaytime")->load() + 1,
-                  apvts.getRawParameterValue ("delayfb")->load(),
-                  apvts.getRawParameterValue ("delaymix")->load(),
+                  pad.apply (macropad::DelayFb,
+                             apvts.getRawParameterValue ("delayfb")->load()),
+                  pad.apply (macropad::DelayMix,
+                             apvts.getRawParameterValue ("delaymix")->load()),
                   bpm);
     fx.process (left, right, numSamples);
 
@@ -1259,11 +1502,20 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
                           apvts.getRawParameterValue ("bchrmix")->load());
     bassChorus.process (left, right, numSamples);
 
-    bassReverb.setParams (apvts.getRawParameterValue ("brevon")->load() >= 0.5f,
-                          apvts.getRawParameterValue ("brevsize")->load(),
+    bassReverb.setParams (apvts.getRawParameterValue ("brevon")->load() >= 0.5f
+                              || (padUnits & macropad::uBassRev) != 0,
+                          pad.apply (macropad::RevSize,
+                                     apvts.getRawParameterValue ("brevsize")->load()),
                           apvts.getRawParameterValue ("brevdamp")->load(),
-                          apvts.getRawParameterValue ("brevmix")->load());
+                          pad.apply (macropad::RevMix,
+                                     apvts.getRawParameterValue ("brevmix")->load()));
     bassReverb.process (left, right, numSamples);
+
+    {
+        float gains[GraphicEq::numBands];
+        bassEq.setParams (eqGains (0, gains), gains);
+        bassEq.process (left, right, numSamples);
+    }
 
     // ---- Drums: sequencer pattern (Seq mode) plus live MIDI on channel 10
     //             (any mode), so voices/echoes render and can be finger-drummed.
@@ -1317,40 +1569,63 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
             apvts.getRawParameterValue ("chdecay")->load(),
             apvts.getRawParameterValue ("ohdecay")->load());
 
-        // Render drums into their own buffer so the drum delay applies to the
-        // drum sum only, then mix into the master. Voices render mono; the second
-        // buffer picks the line up at the delay, as on the bass line.
+        // SPREAD is the master width over the per-voice positions: it scales how
+        // far out each one sits, so at 0 the kit collapses to the centre however
+        // the BALANCE page is set.
+        {
+            static const char* panIds[] = { "bdpan", "sdpan", "cppan", "chpan", "ohpan" };
+            const float spread = apvts.getRawParameterValue ("drumspread")->load();
+            float pans[DrumMachine::numVoices];
+            for (int i = 0; i < DrumMachine::numVoices; ++i)
+                pans[i] = apvts.getRawParameterValue (panIds[i])->load() * spread;
+            drums.setPan (pans);
+        }
+
+        // Render drums into their own pair of buffers so the drum FX apply to
+        // the drum sum only, then mix into the master. Unlike the bass line this
+        // one is a pair from the source: the voices are placed across the image
+        // individually, which is width the delay cannot produce. At SPREAD 0
+        // every voice sits centre and both channels carry the same sum, so the
+        // line behaves exactly as it did when it was mono.
         if ((int) drumBuffer.size() < numSamples)
             drumBuffer.resize ((size_t) numSamples);
         if ((int) drumBufferR.size() < numSamples)
             drumBufferR.resize ((size_t) numSamples);
+        // both cleared, since the voices now add into the pair rather than the
+        // right channel being copied from the left further down
         std::fill_n (drumBuffer.begin(), numSamples, 0.0f);
+        std::fill_n (drumBufferR.begin(), numSamples, 0.0f);
         float* dbuf  = drumBuffer.data();
         float* dbufR = drumBufferR.data();
 
         int dpos = 0;
         for (const auto& e : drumEvents)
         {
-            drums.render (dbuf + dpos, e.offset - dpos);
+            drums.render (dbuf + dpos, dbufR + dpos, e.offset - dpos);
             dpos = e.offset;
             drums.trigger (e.voice, e.dyn);
         }
-        drums.render (dbuf + dpos, numSamples - dpos);
+        drums.render (dbuf + dpos, dbufR + dpos, numSamples - dpos);
 
         // Drum line FX chain: filter -> distortion -> delay -> compressor
         // -> chorus -> reverb, mirroring the bass line.
-        drumFilter.setParams (apvts.getRawParameterValue ("dflton")->load() >= 0.5f,
+        drumFilter.setParams (apvts.getRawParameterValue ("dflton")->load() >= 0.5f
+                                  || (padUnits & macropad::uDrumFilt) != 0,
                               (int) apvts.getRawParameterValue ("dfltmode")->load(),
-                              apvts.getRawParameterValue ("dfltcut")->load(),
+                              pad.apply (macropad::DrumFltCut,
+                                         apvts.getRawParameterValue ("dfltcut")->load()),
                               apvts.getRawParameterValue ("dfltres")->load(),
                               apvts.getRawParameterValue ("dfltenv")->load());
-        drumFilter.process (dbuf, numSamples);
+        drumFilter.process (dbuf, dbufR, numSamples);
 
         // Drive on the drum bus, ahead of the delay so the echoes stay gritty
-        drumDist.setParams (distParams (drumDistIds));
-        drumDist.process (dbuf, numSamples);
-
-        juce::FloatVectorOperations::copy (dbufR, dbuf, numSamples);
+        {
+            auto dp = distParams (drumDistIds);
+            dp.on    = dp.on || (padUnits & macropad::uDrumDist) != 0;
+            dp.drive = pad.apply (macropad::DrumDrive, dp.drive);
+            drumDist.setParams (dp);
+        }
+        drumDist.process (dbuf, dbufR, numSamples);
 
         drumFx.setParams (apvts.getRawParameterValue ("ddelayon")->load() >= 0.5f,
                           (int) apvts.getRawParameterValue ("ddelaytype")->load(),
@@ -1378,6 +1653,12 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
                               apvts.getRawParameterValue ("drevmix")->load());
         drumReverb.process (dbuf, dbufR, numSamples);
 
+        {
+            float gains[GraphicEq::numBands];
+            drumEq.setParams (eqGains (1, gains), gains);
+            drumEq.process (dbuf, dbufR, numSamples);
+        }
+
         juce::FloatVectorOperations::add (left,  dbuf,  numSamples);
         juce::FloatVectorOperations::add (right, dbufR, numSamples);
     }
@@ -1401,6 +1682,24 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     // sample-for-sample identical whether or not the drums play.
     juce::FloatVectorOperations::multiply (left,  dsp303::masterHeadroom, numSamples);
     juce::FloatVectorOperations::multiply (right, dsp303::masterHeadroom, numSamples);
+
+    // A host that took the mono layout has been running the whole chain into a
+    // scratch right channel, so fold it back in rather than dropping it. It used
+    // to be dropped, which was survivable only because nothing but the ping-pong
+    // delay could put anything different over there — and even then it silently
+    // ate every other echo. Now that the drums spread and the bass has unison,
+    // discarding it would throw away half the instrument. Averaged rather than
+    // summed, so a centred line comes back at its own level; with the two
+    // channels identical the fold is exact and changes nothing.
+    if (buffer.getNumChannels() < 2)
+    {
+        for (int i = 0; i < numSamples; ++i)
+            left[i] = (left[i] + right[i]) * 0.5f;
+
+        // the limiter's detector is linked across the pair, so give it the
+        // signal that is actually going out on both sides
+        juce::FloatVectorOperations::copy (right, left, numSamples);
+    }
 
     masterLimiter.process (left, right, numSamples);
 }
@@ -1548,6 +1847,8 @@ void BP303AudioProcessor::setStateInformation (const void* data, int sizeInBytes
         if (auto* pattern = xml->getChildByName ("PATTERN"))
         {
             sequencer.length.store (pattern->getIntAttribute ("length", 16));
+            sequencer.patternLength.store (Sequencer303::followBar);
+            sequencer.patternFit.store (false);
             int i = 0;
             for (auto* step : pattern->getChildWithTagNameIterator ("STEP"))
             {
@@ -1561,6 +1862,7 @@ void BP303AudioProcessor::setStateInformation (const void* data, int sizeInBytes
                                                   : dyn303::Normal);
                 sequencer.steps[i].slide.store (step->getBoolAttribute ("slide"));
                 sequencer.steps[i].hold.store (1);
+                sequencer.steps[i].ratchet.store (1);
                 ++i;
             }
 
