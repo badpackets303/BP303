@@ -433,9 +433,17 @@ int main()
             continue;
 
         hold->setToggleState (false, juce::sendNotification);
-        const auto off = skinEd->createComponentSnapshot (hold->getBounds());
+        // Mapped into the editor's own space rather than passed straight in.
+        // `getBounds()` is in the button's *parent's* coordinates, and the
+        // editor scales its content to whatever size the host gives it — so the
+        // two only agree while that scale happens to be 1. It was, until the
+        // window grew tall enough to be scaled down to fit, at which point this
+        // sampled the wrong pixels and reported that arming HOLD lit nothing.
+        const auto shotArea = skinEd->getLocalArea (hold, hold->getLocalBounds());
+
+        const auto off = skinEd->createComponentSnapshot (shotArea);
         hold->setToggleState (true, juce::sendNotification);
-        const auto on = skinEd->createComponentSnapshot (hold->getBounds());
+        const auto on = skinEd->createComponentSnapshot (shotArea);
 
         const int changed = pixelsDiffering (off, on);
         const int area = juce::jmax (1, off.getWidth() * off.getHeight());

@@ -495,6 +495,69 @@ private:
 // A key is also a drag source, with two destinations: dropped on the SONG list
 // it arranges that pattern, and dragged out of the plugin window it becomes a
 // .mid file for the host (see the editor's shouldDropFilesWhenDraggedExternally).
+// The LFO's shape with a dot riding it, drawn from the same `lfo::Lfo` the audio
+// thread reads and the phase that thread published — so it cannot show a wave
+// the DSP isn't producing, the way `EqBands` takes its curve from the audio
+// path's own coefficients rather than redrawing them.
+//
+// It earns its place by answering the two questions the controls can't: whether
+// the LFO is moving at all, and where in its cycle it is. Both were guesswork
+// while this thing lived only in the host's automation list.
+class LfoScope : public juce::Component, private juce::Timer
+{
+public:
+    explicit LfoScope (BP303AudioProcessor& p);
+    void paint (juce::Graphics&) override;
+
+    // Fired on the ticks this decides are worth drawing, so the rings round the
+    // modulated knobs come off the same clock and the same early-out. The pad's
+    // timer only ticks the knobs while the pad is moving, so without this an
+    // LFO's rings would sit still while the sound moved.
+    std::function<void()> onLfoMoved;
+
+    // With DRAW selected the scope *is* the shape editor: dragging across it
+    // paints step levels, the same gesture DrumGrid uses on the pattern lanes.
+    // Editing the picture you are already watching beats a separate panel that
+    // would have to be squeezed in beside it, and the phase dot means you are
+    // drawing with the playhead visible.
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+
+private:
+    void timerCallback() override;
+
+    // Which step a point is over, and what level its height means. Shared by
+    // the mouse handlers and the drawing so a step cannot be painted somewhere
+    // other than where it is shown.
+    int   stepAt (juce::Point<float> p) const;
+    float levelAt (juce::Point<float> p) const;
+    juce::Rectangle<float> plotArea() const;
+    void  paintStep (juce::Point<float> p);
+
+    // The loop end marker: where it sits, and setting it from a drag. The end
+    // of the drawn loop is one grabbable bar the same way a drum lane's length
+    // is — near it a drag moves the loop point, away from it a drag paints
+    // steps, which is why the two need telling apart on mouseDown.
+    int   drawLen() const;
+    float endMarkerX() const;
+    void  setLenFrom (juce::Point<float> p);
+    bool  draggingEnd = false;
+
+    BP303AudioProcessor& proc;
+
+    // Only a moved dot or a changed shape costs a repaint. An LFO switched off
+    // is a still picture, and a still picture should not cost 25 frames a second
+    // in a plugin whose CPU has always been in the editor.
+    double lastPhase = -1.0;
+    int    lastShape = -1;
+    float  lastDepth = 0.0f;
+    bool   lastOn = false;
+    int    lastLen = -1;    // so a host-automated loop length repaints the marker
+
+    static constexpr int plotInset = 4;
+};
+
 class PatternKeys : public juce::Component, private juce::Timer
 {
 public:
@@ -838,6 +901,14 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
 
+    // The design size the layout is written in. Public because the pixel-level
+    // tools — repaint_test, skin_test — have to render at scale 1 to compare a
+    // clipped redraw against a full one, and they used to get it from the resize
+    // *maximum*. That is no longer the same number: the maximum is now whatever
+    // fits the user's display, since a window taller than the screen hides its
+    // own resize corner and cannot be shrunk back.
+    static juce::Point<int> nativeSize();
+
     // Dragging a pattern key clear of the plugin window turns the drag into a
     // .mid file for the host, so the same gesture arranges into the SONG list or
     // drops a region on a track depending on where it ends up.
@@ -908,7 +979,12 @@ private:
     // same amount leaves the grids, keypads and SONG column exactly where they
     // were — the aspect ratio is the only thing that moved, and a project saved
     // before the pad reopens at its old width and a slightly taller window.
-    static constexpr int nativeWidth = 1466, nativeHeight = 892;
+    // The height grew again, by the LFO row plus its gap. Rows above the lower
+    // region are still removed from the top, so the grids, keypads and SONG
+    // column stay exactly where they were and a project saved before the LFO
+    // reopens at its old width and a taller window — the same trade the pad's
+    // 44px took.
+    static constexpr int nativeWidth = 1466, nativeHeight = 892 + 90 + 6;
 
     // The drums/pad/EQ row. Read by both layoutContent and the chrome, which is
     // why it is a constant rather than a literal in each.
@@ -1123,7 +1199,37 @@ private:
     std::vector<PadKnob> padKnobs;
 
     // Recomputes each destination knob's offset and repaints the ones that moved.
+    // Both modulators feed the one `padOffset` property a knob draws from: two
+    // indicator systems on one knob would need every skin to know about both,
+    // and the whole point of putting the offset into `drawRotarySlider` was that
+    // no skin has to know about any of it.
     void updatePadKnobs();
+
+    // --- LFO 1 ---------------------------------------------------------------
+    // A row of its own rather than a tab, because a tab you have to open is the
+    // wrong home for the one control that tells you whether a patch is moving.
+    // Sized for the LFOs that follow: LFO 1 takes the left, and the scope fills
+    // the rest until there is a second one to put there.
+    // A plain titled panel rather than an FxSection: a tab bar with one tab on
+    // it costs 18px of the row's height and offers nothing to click. When LFO 2
+    // and 3 arrive they go side by side across this row, not behind tabs — a
+    // source you have to reveal is no use as a drag source.
+    static constexpr int lfoRowH = 90;
+
+    juce::ToggleButton lfoOn { "ACTIVE" };
+    std::unique_ptr<ButtonAtt> lfoOnAtt;
+    juce::ToggleButton lfoSync { "SYNC" };
+    std::unique_ptr<ButtonAtt> lfoSyncAtt;
+    juce::ToggleButton lfoSmooth { "SMOOTH" };
+    std::unique_ptr<ButtonAtt> lfoSmoothAtt;
+    // Watches the shape choice so SMOOTH greys and the scope's step slots
+    // appear when DRAW is picked, whether that came from the switch, a preset
+    // load or a host automation lane.
+    std::unique_ptr<juce::ParameterAttachment> lfoShapeAtt;
+    Switch lfoShape;
+    Choice lfoDiv, lfoDest;
+    Knob   lfoRate, lfoAmt;
+    LfoScope lfoScope { proc };
 
     // LATCH sits in the pad's readout column rather than the tab bar: four tabs
     // across 300px leave the bar with nothing spare, unlike the EQ's two.

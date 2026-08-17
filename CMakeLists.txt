@@ -128,6 +128,25 @@ target_link_libraries(BP303_EqTabSnapshot PRIVATE
     juce::juce_dsp
     juce::juce_recommended_config_flags)
 
+# Renders the LFO row running, one snapshot per shape plus the knob rings — at
+# rest the row draws a greyed wave with no dot and no rings
+juce_add_console_app(BP303_LfoSnapshot PRODUCT_NAME "BP303_LfoSnapshot")
+target_sources(BP303_LfoSnapshot PRIVATE
+    Tools/lfo_snapshot.cpp
+    Source/PluginProcessor.cpp
+    Source/PluginEditor.cpp)
+target_compile_definitions(BP303_LfoSnapshot PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    # The rings come off the scope's timer, so the ring snapshot has to let the
+    # message loop run for a tick. Same dev-aid-only exception the pad's makes.
+    JUCE_MODAL_LOOPS_PERMITTED=1
+    JucePlugin_Name="BP303")
+target_link_libraries(BP303_LfoSnapshot PRIVATE
+    juce::juce_audio_utils
+    juce::juce_dsp
+    juce::juce_recommended_config_flags)
+
 # Renders one snapshot per XY pad mode with the pad held off centre — at rest
 # the pad draws a handle in an empty square and none of the states worth seeing
 juce_add_console_app(BP303_PadTabSnapshot PRODUCT_NAME "BP303_PadTabSnapshot")
@@ -282,6 +301,56 @@ juce_add_console_app(BP303_PadTest PRODUCT_NAME "BP303_PadTest")
 target_sources(BP303_PadTest PRIVATE
     Tools/pad_test.cpp)
 target_link_libraries(BP303_PadTest PRIVATE
+    juce::juce_recommended_config_flags)
+
+# Headless, JUCE-free test for the LFO core: its shapes, its derived phase, and
+# the identity that keeps an unrouted LFO from re-voicing anything
+juce_add_console_app(BP303_LfoTest PRODUCT_NAME "BP303_LfoTest")
+target_sources(BP303_LfoTest PRIVATE
+    Tools/lfo_test.cpp)
+target_link_libraries(BP303_LfoTest PRIVATE
+    juce::juce_recommended_config_flags)
+
+# Headless test that LFO 1 is wired through to the audio, and that processBlock's
+# chunked path stays unreachable — bit-identically — until something is routed
+juce_add_console_app(BP303_LfoWireTest PRODUCT_NAME "BP303_LfoWireTest")
+target_sources(BP303_LfoWireTest PRIVATE
+    Tools/lfo_wire_test.cpp
+    Source/PluginProcessor.cpp
+    Source/PluginEditor.cpp)
+target_compile_definitions(BP303_LfoWireTest PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JucePlugin_Name="BP303")
+target_link_libraries(BP303_LfoWireTest PRIVATE
+    juce::juce_audio_utils
+    juce::juce_dsp
+    juce::juce_recommended_config_flags)
+
+# Headless test that drawing into the LFO scope stores the level it looks like,
+# and that a step drawn up moves its knob up (with a positive depth) — one
+# negation in the whole screen-y-to-knob path, and this pins it
+juce_add_console_app(BP303_LfoDrawTest PRODUCT_NAME "BP303_LfoDrawTest")
+target_sources(BP303_LfoDrawTest PRIVATE
+    Tools/lfo_draw_test.cpp
+    Source/PluginProcessor.cpp
+    Source/PluginEditor.cpp)
+target_compile_definitions(BP303_LfoDrawTest PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JucePlugin_Name="BP303")
+target_link_libraries(BP303_LfoDrawTest PRIVATE
+    juce::juce_audio_utils
+    juce::juce_dsp
+    juce::juce_recommended_config_flags)
+
+# Headless, JUCE-free measurement of what modulating cutoff at block rate costs:
+# how big each riser of the staircase is in cents, and what per-sample
+# modulation costs the voice. Decides where an LFO's update rate has to live
+juce_add_console_app(BP303_LfoRateTest PRODUCT_NAME "BP303_LfoRateTest")
+target_sources(BP303_LfoRateTest PRIVATE
+    Tools/lfo_rate_test.cpp)
+target_link_libraries(BP303_LfoRateTest PRIVATE
     juce::juce_recommended_config_flags)
 
 # Headless, JUCE-free test for per-lane drum pattern length: a following lane is

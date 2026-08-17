@@ -62,6 +62,26 @@ enum Unit : unsigned
     uDrumFilt  = 1u << 4
 };
 
+// Which unit a destination lives in, so anything offsetting that destination can
+// engage the unit rather than being silently swallowed by a bypass. The pad
+// answers this per *mode* (below); an LFO picks a single destination and needs
+// it per destination, and one table beats two.
+//
+// The first three are 0 because the 303's own filter is always live — the same
+// fact that makes ACID the one pad mode needing no unit.
+inline unsigned unitFor (int d)
+{
+    switch (d)
+    {
+        case DistDrive: case DistColor: case DistLows: return uBassDist;
+        case DelayMix:  case DelayFb:                  return uBassDelay;
+        case RevMix:    case RevSize:                  return uBassRev;
+        case DrumDrive:                                return uDrumDist;
+        case DrumFltCut:                               return uDrumFilt;
+        default:                                       return 0u;
+    }
+}
+
 // One parameter an axis moves, and how far. `numDests` is the unused slot.
 struct Target
 {

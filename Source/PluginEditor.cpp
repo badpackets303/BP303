@@ -2696,6 +2696,287 @@ void XyPad::timerCallback()
         repaint (r);
 }
 
+LfoScope::LfoScope (BP303AudioProcessor& p) : proc (p)
+{
+    startTimerHz (25);
+}
+
+void LfoScope::timerCallback()
+{
+    const auto l = proc.readLfo();
+    const double phase = proc.lfoPhaseNow.load();
+
+    // A still LFO is a still picture. Repainting one 25 times a second is the
+    // kind of cost that made this plugin's CPU an editor problem in the first
+    // place, so only a moved dot or a changed drawing earns a frame.
+    const bool moved = std::abs (phase - lastPhase) > 1.0e-4;
+    if (! moved && l.shape == lastShape && l.depth == lastDepth && l.active() == lastOn
+        && l.loopLen() == lastLen)
+        return;
+
+    lastPhase = phase;
+    lastShape = l.shape;
+    lastDepth = l.depth;
+    lastOn    = l.active();
+    lastLen   = l.loopLen();
+
+    // The transition to inactive reaches here too, which is what clears a stale
+    // ring off a knob the LFO has stopped pushing.
+    if (onLfoMoved != nullptr)
+        onLfoMoved();
+
+    repaint();
+}
+
+juce::Rectangle<float> LfoScope::plotArea() const
+{
+    return getLocalBounds().reduced (plotInset).toFloat();
+}
+
+int LfoScope::stepAt (juce::Point<float> p) const
+{
+    const auto r = plotArea();
+    if (r.getWidth() <= 0.0f)
+        return 0;
+
+    const float t = (p.x - r.getX()) / r.getWidth();
+    return juce::jlimit (0, lfo::customSteps - 1, (int) (t * lfo::customSteps));
+}
+
+float LfoScope::levelAt (juce::Point<float> p) const
+{
+    const auto r = plotArea();
+    if (r.getHeight() <= 0.0f)
+        return 0.0f;
+
+    // The inverse of the height the wave is drawn at, so a step lands under the
+    // pointer rather than near it.
+    return juce::jlimit (-1.0f, 1.0f,
+                         (r.getCentreY() - p.y) / (r.getHeight() * 0.42f));
+}
+
+void LfoScope::paintStep (juce::Point<float> p)
+{
+    if (proc.apvts.getRawParameterValue ("lfo1shape")->load() != (float) lfo::Custom)
+        return;
+
+    proc.lfoShape[stepAt (p)].store (levelAt (p));
+
+    // Repaint now rather than waiting for the tick: an LFO that is switched off
+    // publishes no phase, so the timer's early-out would sit on the drawing
+    // until something moved and the shape would appear to lag the mouse.
+    repaint();
+    if (onLfoMoved != nullptr)
+        onLfoMoved();
+}
+
+int LfoScope::drawLen() const
+{
+    if (auto* v = proc.apvts.getRawParameterValue ("lfo1len"))
+        return juce::jlimit (2, lfo::customSteps, (int) v->load());
+    return lfo::customSteps;
+}
+
+float LfoScope::endMarkerX() const
+{
+    const auto r = plotArea();
+    return r.getX() + r.getWidth() * (float) drawLen() / lfo::customSteps;
+}
+
+void LfoScope::setLenFrom (juce::Point<float> p)
+{
+    const auto r = plotArea();
+    if (r.getWidth() <= 0.0f)
+        return;
+
+    // Snap to a step boundary: the loop point is a count of steps, so it can
+    // only fall between them. Round rather than truncate so the nearest edge
+    // wins, and clamp to at least two — a one-step loop is a constant, which is
+    // what a flat drawing already gives.
+    const int len = juce::jlimit (2, lfo::customSteps,
+                                  juce::roundToInt ((p.x - r.getX()) / r.getWidth()
+                                                    * lfo::customSteps));
+    if (auto* param = proc.apvts.getParameter ("lfo1len"))
+        param->setValueNotifyingHost (param->convertTo0to1 ((float) len));
+
+    repaint();
+}
+
+void LfoScope::mouseDown (const juce::MouseEvent& e)
+{
+    // Grab the end marker if the press landed on it; otherwise paint. Only the
+    // drawn shape has a marker, so for every other shape a press always paints
+    // (and paintStep itself no-ops off the drawn shape, so it does nothing).
+    const bool drawable =
+        proc.apvts.getRawParameterValue ("lfo1shape")->load() == (float) lfo::Custom;
+
+    draggingEnd = drawable && std::abs (e.position.x - endMarkerX()) <= 5.0f;
+
+    if (draggingEnd)
+        setLenFrom (e.position);
+    else
+        paintStep (e.position);
+}
+
+void LfoScope::mouseDrag (const juce::MouseEvent& e)
+{
+    if (draggingEnd)
+        setLenFrom (e.position);
+    else
+        paintStep (e.position);
+}
+
+void LfoScope::mouseUp (const juce::MouseEvent&) { draggingEnd = false; }
+
+void LfoScope::paint (juce::Graphics& g)
+{
+    const auto& p = ui303::palette (proc.uiSkin.load());
+    const auto r = plotArea();
+    if (r.getWidth() <= 2.0f || r.getHeight() <= 2.0f)
+        return;
+
+    g.setColour (p.cellOff.darker (0.5f));
+    g.fillRect (r);
+
+    g.setColour (p.outline.withAlpha (0.45f));
+    g.drawLine (r.getX(), r.getCentreY(), r.getRight(), r.getCentreY(), 1.0f);
+
+    const auto l = proc.readLfo();
+    const bool live = l.active();
+    const bool drawable = l.shape == lfo::Custom;
+
+    // The slots you are painting into. Without them "somewhere along the line"
+    // is the only aim you get, and a sixteen-step shape drawn against nothing
+    // reads as a freehand curve that happens to have corners in it. Same
+    // reasoning as the fitted drum lane's step ticks across its row.
+    if (drawable)
+    {
+        g.setColour (p.outline.withAlpha (0.25f));
+        for (int i = 1; i < lfo::customSteps; ++i)
+        {
+            const float x = r.getX() + r.getWidth() * (float) i / lfo::customSteps;
+            g.drawLine (x, r.getY(), x, r.getBottom(), 1.0f);
+        }
+    }
+
+    const double phase = proc.lfoPhaseNow.load();
+
+    // The drawn shape draws slots, not time — the same rule the fitted drum lane
+    // follows. All sixteen steps keep their own column whatever the loop length,
+    // so the loop plays across the columns up to the marker and the steps past
+    // it stay visible to edit, dimmed. Drawing the loop stretched to full width
+    // instead would hide the steps outside it and leave the marker mid-column
+    // with nothing to point at.
+    if (drawable)
+    {
+        const int   len   = drawLen();
+        const float markX = endMarkerX();
+
+        // The loop region is exactly what plays — smoothed or stepped, over
+        // `len` steps — and valueAt maps that loop across [0,1), so mapping u
+        // onto [left, marker] lands each step on its own 1/16 column.
+        juce::Path loop;
+        const int res = juce::jmax (2, (int) (markX - r.getX()));
+        for (int i = 0; i <= res; ++i)
+        {
+            const double u = (double) i / res;
+            const float  v = l.valueAt (u);
+            const float  x = r.getX() + (float) u * (markX - r.getX());
+            const float  y = r.getCentreY() - v * r.getHeight() * 0.42f;
+            if (i == 0) loop.startNewSubPath (x, y);
+            else        loop.lineTo (x, y);
+        }
+        const float w = live ? juce::jmax (0.6f, std::abs (l.depth)) : 0.6f;
+        g.setColour (p.orange.withAlpha (w));
+        g.strokePath (loop, juce::PathStrokeType (1.6f));
+
+        // The steps beyond the loop are still there to edit, just not played —
+        // drawn dimmed and stepped, read straight off the table so a drag on
+        // them still shows.
+        g.setColour (p.text.withAlpha (0.3f));
+        const float colW = r.getWidth() / lfo::customSteps;
+        for (int s = len; s < lfo::customSteps; ++s)
+        {
+            const float v = juce::jlimit (-1.0f, 1.0f, proc.lfoShape[s].load());
+            const float y = r.getCentreY() - v * r.getHeight() * 0.42f;
+            g.drawLine (r.getX() + s * colW, y, r.getX() + (s + 1) * colW, y, 1.6f);
+        }
+
+        // The marker: a bar with a grab notch top and bottom, so it reads as
+        // something to pull rather than one more divider.
+        g.setColour (p.orange.withAlpha (0.85f));
+        g.drawLine (markX, r.getY(), markX, r.getBottom(), 2.0f);
+        g.fillRect (markX - 3.0f, r.getY(), 6.0f, 4.0f);
+        g.fillRect (markX - 3.0f, r.getBottom() - 4.0f, 6.0f, 4.0f);
+
+        if (! live)
+            return;
+
+        const double t = phase - std::floor (phase);
+        const float dx = r.getX() + (float) t * (markX - r.getX());
+        const float dy = r.getCentreY() - l.valueAt (t) * r.getHeight() * 0.42f;
+        g.setColour (p.orange.withAlpha (0.35f));
+        g.drawLine (dx, r.getY(), dx, r.getBottom(), 1.0f);
+        g.setColour (p.orange);
+        g.fillEllipse (dx - 3.0f, dy - 3.0f, 6.0f, 6.0f);
+        return;
+    }
+
+    // How much of the LFO to show. One cycle for the periodic shapes, because
+    // "where am I in the cycle" is the question a dot on a sine answers.
+    //
+    // Sample & hold gets four, and has to: its cycle is one held value, so a
+    // one-cycle window draws a flat line — truthfully, and uselessly. Its shape
+    // is not in a period, it emerges across several, so the window is anchored
+    // to the last four *actual* holds rather than to an arbitrary four. That
+    // matters because the held value is a hash of the cycle index: draw cycles
+    // 0-3 while the audio is on cycle 97 and the picture would be a plausible
+    // random pattern that is not the one being played.
+    const bool  steppy = l.shape == lfo::SampleHold;
+    const double span  = steppy ? 4.0 : 1.0;
+    const double start = steppy ? std::floor (phase) - 3.0 : 0.0;
+
+    // Drawn from `lfo::Lfo::valueAt` itself, so the picture is the generator's
+    // own output rather than a second opinion on what a sine looks like — the
+    // same reason `EqBands` takes its curve from the audio path's coefficients.
+    juce::Path wave;
+    const int steps = juce::jmax (2, (int) r.getWidth());
+    for (int i = 0; i <= steps; ++i)
+    {
+        const double u = (double) i / steps;
+        const float  v = l.valueAt (start + u * span);
+        const float  x = r.getX() + (float) u * r.getWidth();
+        const float  y = r.getCentreY() - v * r.getHeight() * 0.42f;
+        if (i == 0) wave.startNewSubPath (x, y);
+        else        wave.lineTo (x, y);
+    }
+
+    // Depth scales the drawing's opacity rather than its height: at a glance
+    // what matters is whether this is doing anything, and a shape squashed to a
+    // flat line would be indistinguishable from the wrong shape. (The drawn
+    // shape returns above, so this is only the periodic ones.)
+    const float weight = live ? juce::jlimit (0.25f, 1.0f, std::abs (l.depth)) : 0.18f;
+    g.setColour ((live ? p.orange : p.text).withAlpha (weight));
+    g.strokePath (wave, juce::PathStrokeType (1.6f));
+
+    if (! live)
+        return;
+
+    // The dot rides the wave at the phase the audio thread last used, so a
+    // synced LFO's dot is where the bar says it is — including after a host
+    // loop, which is the whole reason that phase is derived rather than counted.
+    // On the stepped window it lands in the last quarter, on the hold currently
+    // sounding, with the three before it to its left.
+    const double u = (phase - start) / span;
+    const float dx = r.getX() + (float) u * r.getWidth();
+    const float dy = r.getCentreY() - l.valueAt (phase) * r.getHeight() * 0.42f;
+
+    g.setColour (p.orange.withAlpha (0.35f));
+    g.drawLine (dx, r.getY(), dx, r.getBottom(), 1.0f);
+    g.setColour (p.orange);
+    g.fillEllipse (dx - 3.0f, dy - 3.0f, 6.0f, 6.0f);
+}
+
 void XyPad::paint (juce::Graphics& g)
 {
     const auto& p = ui303::palette (proc.uiSkin.load());
@@ -4277,6 +4558,54 @@ BP303AudioProcessorEditor::BP303AudioProcessorEditor (BP303AudioProcessor& p)
         { &drumFltCut,      macropad::DrumFltCut },
     };
 
+    // --- LFO 1 ---------------------------------------------------------------
+    for (auto* b : { &lfoOn, &lfoSync, &lfoSmooth })
+        content.addAndMakeVisible (b);
+    lfoOnAtt     = std::make_unique<ButtonAtt> (proc.apvts, "lfo1on",     lfoOn);
+    lfoSyncAtt   = std::make_unique<ButtonAtt> (proc.apvts, "lfo1sync",   lfoSync);
+    lfoSmoothAtt = std::make_unique<ButtonAtt> (proc.apvts, "lfo1smooth", lfoSmooth);
+
+    lfoShape.init (content, proc, proc.apvts, "lfo1shape", "SHAPE");
+    lfoDiv .init (content, proc.apvts, "lfo1div",  "DIVISION");
+    lfoDest.init (content, proc.apvts, "lfo1dest", "DESTINATION");
+    lfoRate.init (content, proc.apvts, "lfo1rate", "RATE");
+    // Bipolar: AMOUNT is a displacement either side of the knob, so its ring
+    // reads out from the centre rather than up from zero.
+    lfoAmt .init (content, proc.apvts, "lfo1amt",  "AMOUNT", ui303::HotNone, true);
+
+    content.addAndMakeVisible (lfoScope);
+
+    // RATE only means anything free-running and DIVISION only means anything
+    // synced. The dead one greys rather than hiding, so the row does not reflow
+    // every time SYNC is clicked.
+    const auto followSync = [this]
+    {
+        const bool synced = proc.apvts.getRawParameterValue ("lfo1sync")->load() >= 0.5f;
+        lfoRate.slider.setEnabled (! synced);
+        lfoRate.label.setAlpha (synced ? 0.4f : 1.0f);
+        lfoDiv.box.setEnabled (synced);
+        lfoDiv.label.setAlpha (synced ? 1.0f : 0.4f);
+    };
+    lfoSync.onStateChange = followSync;
+    followSync();
+
+    // SMOOTH only means anything with DRAW selected. Greyed rather than hidden,
+    // for the reason RATE and DIVISION are.
+    const auto followShape = [this]
+    {
+        const bool drawn = proc.apvts.getRawParameterValue ("lfo1shape")->load()
+                               == (float) lfo::Custom;
+        lfoSmooth.setEnabled (drawn);
+        lfoSmooth.setAlpha (drawn ? 1.0f : 0.4f);
+        lfoScope.repaint();
+    };
+    if (auto* shapeParam = proc.apvts.getParameter ("lfo1shape"))
+        lfoShapeAtt = std::make_unique<juce::ParameterAttachment> (
+            *shapeParam, [followShape] (float) { followShape(); }, nullptr);
+    followShape();
+
+    lfoScope.onLfoMoved = [this] { updatePadKnobs(); };
+
     xyPad.onPadMoved = [this] { updatePadKnobs(); };
 
     if (auto* modeParam = proc.apvts.getParameter ("padmode"))
@@ -4717,34 +5046,53 @@ BP303AudioProcessorEditor::BP303AudioProcessorEditor (BP303AudioProcessor& p)
     const int rememberedWidth = proc.editorWidth.load();
 
     // Resizable, but only uniformly: the layout is a fixed design that scales.
-    // The lower limit is about 60%, which fits a 1366x768 laptop with room to
-    // spare; the upper is the native size, past which it would just be soft.
-    setResizable (true, true);
-    setResizeLimits (juce::roundToInt (nativeWidth * 0.6),
-                     juce::roundToInt (nativeHeight * 0.6),
-                     nativeWidth, nativeHeight);
-    if (auto* constrainer = getConstrainer())
-        constrainer->setFixedAspectRatio ((double) nativeWidth / (double) nativeHeight);
+    //
+    // **The size limits have to be computed against the screen, not fixed.** A
+    // window taller than the display puts its resize corner off the bottom of
+    // that display, and a corner you cannot reach is a window you cannot shrink
+    // — the plugin is then stuck at a size the user never chose and has no way
+    // to leave. That is not hypothetical: growing the design height for the LFO
+    // row did exactly this on a screen that had been fitting the old one
+    // exactly. So the ceiling is whatever fits here, and the floor is allowed
+    // below the nominal 60% when even 60% would not.
+    const double aspect = (double) nativeWidth / (double) nativeHeight;
 
-    // Reopen at the size this project was left at, clamped to what fits here.
-    const auto screen = juce::Desktop::getInstance().getDisplays()
-                            .getPrimaryDisplay();
-    int width = juce::jlimit (juce::roundToInt (nativeWidth * 0.6), nativeWidth,
-                              rememberedWidth);
-    // Only shrink to fit when we actually know the screen size — a headless or
-    // not-yet-configured display reports an empty area, and clamping to that
-    // would open every window at the minimum.
+    int minWidth = juce::roundToInt (nativeWidth * 0.6);
+    int maxWidth = nativeWidth;
+
+    // Only trust the display when it reports something plausible — a headless or
+    // not-yet-configured one reports an empty area, and clamping to that would
+    // open every window at the minimum.
+    const auto screen = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay();
     if (screen != nullptr && screen->userArea.getWidth() > 400
                           && screen->userArea.getHeight() > 300)
     {
-        // Leave room for the host's window frame.
+        // Generous allowance for the host's own chrome: Logic frames a plugin
+        // window with a title bar *and* a header strip of its own, and being a
+        // little smaller than necessary costs some pixels while being a little
+        // too big costs the user the resize corner.
         const auto usable = screen->userArea;
-        width = juce::jmin (width, usable.getWidth() - 40,
-                            juce::roundToInt ((usable.getHeight() - 80)
-                                              * (double) nativeWidth / nativeHeight));
-        width = juce::jmax (juce::roundToInt (nativeWidth * 0.6), width);
+        const int fits = juce::jmin (usable.getWidth() - 60,
+                                     juce::roundToInt ((usable.getHeight() - 140) * aspect));
+
+        // 35% keeps a genuine floor — below that the text stops being legible
+        // and a window that small is its own kind of unusable.
+        maxWidth = juce::jlimit (juce::roundToInt (nativeWidth * 0.35), nativeWidth, fits);
+        minWidth = juce::jmin (minWidth, maxWidth);
     }
-    setSize (width, juce::roundToInt (width * (double) nativeHeight / nativeWidth));
+
+    setResizable (true, true);
+    setResizeLimits (minWidth, juce::roundToInt (minWidth / aspect),
+                     maxWidth, juce::roundToInt (maxWidth / aspect));
+    if (auto* constrainer = getConstrainer())
+        constrainer->setFixedAspectRatio (aspect);
+
+    // Reopen at the size this project was left at, clamped to what fits here.
+    // The remembered width is in the *old* design's pixels for any project that
+    // predates a change to nativeHeight, which is another way this can arrive
+    // too tall — clamping it is what makes such a project openable at all.
+    const int width = juce::jlimit (minWidth, maxWidth, rememberedWidth);
+    setSize (width, juce::roundToInt (width / aspect));
 
     // In the standalone app, centre the window on the display it opens on so the
     // whole UI is visible (hosts position the plugin window themselves, so we
@@ -4896,6 +5244,29 @@ void BP303AudioProcessorEditor::startHelp()
         "LATCH parks the gesture where you leave it instead of springing back. "
         "Double-click the pad to drop a latched one. Only the pad's own two axes "
         "reach your DAW's automation, so you get two lanes rather than a dozen." });
+
+    steps.push_back ({ around ({ &lfoScope, lfoShape.sw.get(), &lfoDest.box,
+                                 &lfoRate.slider, &lfoAmt.slider, &lfoOn,
+                                 &lfoSync, &lfoSmooth }), "The LFO",
+        "The pad's twin: where the pad is a gesture you make, the LFO is one that "
+        "runs on its own. Pick a DESTINATION and it rides that one control for you, "
+        "up and down, for as long as it is on.\n\n"
+        "AMOUNT is how far it swings, either side of where you left the knob - like "
+        "the pad it offsets rather than writes, so your setting stays put with a "
+        "mark on it and the knob moves around it. SYNC locks the swing to the host, "
+        "DIVISION picking the rate from a bar down to a 16th; switch SYNC off and "
+        "RATE sets a free speed instead.\n\n"
+        "It switches on whatever effect its destination lives in and lets go after, "
+        "exactly as the pad does - so routing to the drum filter moves the drums "
+        "even with that filter's own ACTIVE off, and your switch reads the same "
+        "once the LFO stops.\n\n"
+        "The scope is what tells you the thing is moving and where in its cycle it "
+        "is - it draws the shape from the LFO itself, so it can't show a wave the "
+        "sound isn't making. SHAPE runs from sine through square and sample-and-"
+        "hold, and DRAW turns the scope into a 16-step surface you paint your own "
+        "shape into, SMOOTH curving between the steps. Drag the marker in to end "
+        "the loop early: a short loop repeats faster and drifts against the bar, "
+        "the way a short drum lane does." });
 
     steps.push_back ({ around ({ &eqSection }), "The EQ",
         "Ten octave bands a line, drawn as a response curve rather than a bank of "
@@ -5599,6 +5970,16 @@ void BP303AudioProcessorEditor::paintContent (juce::Graphics& g)
     panel (row2.removeFromLeft (perfSectionW), "PERFORMANCE");
     area.removeFromTop (6);
 
+    // LFO row: a plain titled panel, like PERFORMANCE
+    //
+    // This walk has to stay in step with layoutContent's, row for row — the two
+    // are separate passes over one layout, and a row added to one and not the
+    // other slides every frame below it out from under its contents without
+    // moving the contents. That is what a new row breaks first, and it is
+    // invisible until something is rendered.
+    panel (area.removeFromTop (lfoRowH), "LFO 1");
+    area.removeFromTop (6);
+
     // drum row: DRUMS, PAD and EQ all draw their own frames, like the FX panels
     area.removeFromTop (drumRowH);
     area.removeFromTop (6);
@@ -5635,6 +6016,13 @@ void BP303AudioProcessorEditor::updatePadKnobs()
     // genuinely doing nothing to it.
     const auto pad = proc.readPad();
 
+    // The LFO composes on top, in the same order the audio thread composes them
+    // — pad first, then LFO — so the ring shows where the two together have
+    // pushed the knob, clamps included. One property, because a knob with two
+    // indicator systems would need every skin to know about both.
+    const auto lfoState = proc.readLfo();
+    const double lfoPhase = proc.lfoPhaseNow.load();
+
     for (const auto& pk : padKnobs)
     {
         float offset = 0.0f;
@@ -5643,7 +6031,9 @@ void BP303AudioProcessorEditor::updatePadKnobs()
         {
             const float base = param->getValue();
             offset = param->convertTo0to1 (
-                         pad.apply (pk.dest, param->convertFrom0to1 (base))) - base;
+                         lfoState.apply (pk.dest,
+                                         pad.apply (pk.dest, param->convertFrom0to1 (base)),
+                                         lfoPhase)) - base;
         }
 
         // A tenth of a degree of arc is not a thing anyone can see, and a knob
@@ -5655,6 +6045,11 @@ void BP303AudioProcessorEditor::updatePadKnobs()
         props.set ("padOffset", offset);
         pk.knob->slider.repaint();
     }
+}
+
+juce::Point<int> BP303AudioProcessorEditor::nativeSize()
+{
+    return { nativeWidth, nativeHeight };
 }
 
 void BP303AudioProcessorEditor::layoutContent()
@@ -5698,6 +6093,44 @@ void BP303AudioProcessorEditor::layoutContent()
     bassFx.setBounds (row2.removeFromLeft (fxSectionW));
     row2.removeFromLeft (panelGap);
     drumFx.setBounds (row2);
+    area.removeFromTop (6);
+
+    // --- LFO row: full width, because the scope is what fills it -------------
+    // Above the drums row rather than below it, so the two modulators — the pad
+    // and the LFO — are not separated by the whole kit. Full content width
+    // rather than sized to its controls: the controls take the left, and the
+    // scope takes the rest, which is the part that says whether the patch is
+    // moving at all.
+    {
+        // The title strip the panel frame draws into, then one row of controls
+        // with the scope taking whatever is left. Fixed widths rather than a
+        // share of the row, for the reason the drum pages use fixed columns: the
+        // controls should not move when the scope beside them changes size.
+        auto lfoRow = area.removeFromTop (lfoRowH).reduced (10, 0)
+                          .withTrimmedTop (22).withTrimmedBottom (8);
+
+        const auto col = [&lfoRow] (int w)
+        {
+            auto c = lfoRow.removeFromLeft (w);
+            lfoRow.removeFromLeft (8);
+            return c;
+        };
+
+        // Three stacked toggles now, so the column divides in thirds.
+        auto switches = col (84);
+        const int switchH = switches.getHeight() / 3;
+        lfoOn.setBounds (switches.removeFromTop (switchH).reduced (0, 1));
+        lfoSync.setBounds (switches.removeFromTop (switchH).reduced (0, 1));
+        lfoSmooth.setBounds (switches.reduced (0, 1));
+
+        lfoShape.setBounds (col (210));
+        lfoDest .setBounds (col (150));
+        lfoDiv  .setBounds (col (90));
+        lfoRate .setBounds (col (76));
+        lfoAmt  .setBounds (col (76));
+
+        lfoScope.setBounds (lfoRow);
+    }
     area.removeFromTop (6);
 
     // --- drums row: DRUMS on the left, then the PAD, then the EQ ---

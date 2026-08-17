@@ -213,6 +213,19 @@ int main()
                 if (reaches (mode, n.dest))
                     check ((spec (mode).units & n.unit) != 0,
                            "a mode moves a control in a unit it does not engage");
+
+        // `unitFor` answers the same question per destination rather than per
+        // mode, and the LFO engages its units through it. Checked against the
+        // table above so it stays one answer in two shapes rather than becoming
+        // a second opinion — the failure that would let a mode and an LFO
+        // disagree about which unit a control lives in.
+        for (const auto& n : needs)
+            check (unitFor (n.dest) == n.unit,
+                   "unitFor disagrees with the unit a mode engages for that control");
+
+        for (Dest d : { Cutoff, Resonance, EnvMod })
+            check (unitFor (d) == 0u,
+                   "the 303's own controls are always live and need no unit");
     }
 
     // --- 6. the axes push the way the labels say -----------------------------

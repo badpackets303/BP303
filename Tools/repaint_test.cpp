@@ -114,9 +114,14 @@ int main()
     std::unique_ptr<juce::AudioProcessorEditor> editor (proc.createEditor());
     editor->setVisible (true);
     // Native size, so `content`'s scale transform is the identity and the clipped
-    // redraw lands on exactly the pixels the grid asked for.
-    if (auto* c = editor->getConstrainer())
-        editor->setSize (c->getMaximumWidth(), c->getMaximumHeight());
+    // redraw lands on exactly the pixels the grid asked for. Asked for by name
+    // rather than taken from the resize maximum: that maximum is now whatever
+    // fits the display, so on a small screen it is not the design size and the
+    // comparison would be measuring the scaler instead of the grid.
+    {
+        const auto native = BP303AudioProcessorEditor::nativeSize();
+        editor->setSize (native.x, native.y);
+    }
 
     auto* stepGrid = findDescendant<StepGrid> (*editor);
     auto* drumGrid = findDescendant<DrumGrid> (*editor);

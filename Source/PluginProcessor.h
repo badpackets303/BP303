@@ -10,6 +10,7 @@
 #include "DspUtil.h"
 #include "Eq.h"
 #include "Fx303.h"
+#include "Lfo.h"
 #include "MacroPad.h"
 #include "Metronome.h"
 #include "Pcf.h"
@@ -235,6 +236,29 @@ public:
     // the pad is pushing, so that arc cannot disagree with what is being heard.
     macropad::Pad readPad() const;
 
+    // LFO 1's state, on the same terms. Read by the editor as well as the audio
+    // thread, so the ring it draws round a modulated knob comes from the same
+    // place the sound does.
+    lfo::Lfo readLfo() const;
+
+    // Destinations an LFO can be routed to, in `lfo1dest` choice order. That
+    // order is save-file compatibility — a project stores the index — so this
+    // may only grow at the end, exactly like Synth303::Wave. It is every
+    // destination the pad can reach, and a static_assert beside the table keeps
+    // the two lists from drifting apart.
+    static const macropad::Dest* lfoDests();
+    static int numLfoDests();
+
+    // The drawn LFO shape, written by the editor and read by the audio thread.
+    // Plain atomics rather than a lock, the way `Sequencer303::steps` and
+    // `DrumSequencer::stepMask` are: the worst a torn read can do here is mix
+    // two valid tables for one chunk, which is a shape nobody drew for 1.5 ms
+    // and inaudible. A lock on the audio thread would be the real bug.
+    //
+    // Not a parameter — a drawn shape is data, like a pattern, so it is saved
+    // with the patterns rather than exposed as sixteen automation lanes.
+    std::atomic<float> lfoShape[lfo::customSteps];
+
     // Song step currently playing, or -1 when song mode is off / the song is
     // empty. For the editor's playing-row highlight.
     int getSongStep() const { return songStepPlaying.load(); }
@@ -318,6 +342,23 @@ private:
     std::atomic<bool>   songJumped { false };   // jump: switch patterns at once
     std::atomic<double> transportPhaseNow { 0.0 };
     std::atomic<bool>   hostSyncedNow { false };
+
+    // A free-running LFO's phase, in cycles, kept wrapped into [0, 1). Only the
+    // free case needs it — a synced LFO derives its phase from the transport
+    // every block and keeps no running state at all, which is what makes it
+    // survive a host loop. Published so the editor's ring can read the same
+    // phase the audio thread used rather than running a second oscillator that
+    // would slowly disagree with it.
+    std::atomic<double> lfoFreePhase { 0.0 };
+
+public:
+    // The phase the audio thread started this block on, wrapped. Published so
+    // the editor's scope draws where the LFO actually is rather than running a
+    // second oscillator that would drift against it — the same reason the pad's
+    // knob arcs go through `macropad::Pad::apply` instead of re-deriving.
+    std::atomic<double> lfoPhaseNow { 0.0 };
+
+private:
 
     double sampleRateHz = 44100.0;   // captured in prepareToPlay
 

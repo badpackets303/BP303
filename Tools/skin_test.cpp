@@ -80,11 +80,10 @@ int main()
         std::unique_ptr<juce::AudioProcessorEditor> editor (proc.createEditor());
         editor->setVisible (true);   // hit-testing ignores an invisible component
 
-        // Native size, so the scaled content maps 1:1 onto the editor.
-        const auto native = editor->getConstrainer() != nullptr
-                                ? juce::Point<int> (editor->getConstrainer()->getMaximumWidth(),
-                                                    editor->getConstrainer()->getMaximumHeight())
-                                : juce::Point<int> (editor->getWidth(), editor->getHeight());
+        // Native size, so the scaled content maps 1:1 onto the editor and the
+        // hotspot's design coordinates hit-test where they say. Not the resize
+        // maximum — that is now whatever fits the display.
+        const auto native = BP303AudioProcessorEditor::nativeSize();
         editor->setSize (native.x, native.y);
 
         const auto hotspot = ui303::skinMenuHotspot();

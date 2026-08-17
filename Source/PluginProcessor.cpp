@@ -39,6 +39,12 @@ BP303AudioProcessor::BP303AudioProcessor()
     // so a new instance opens on whatever skin was chosen last.
     uiSkin.store (juce::jlimit (0, ui303::numSkins - 1,
                                 loadGlobalSkin (ui303::defaultSkin)));
+
+    // Seeded from `lfo::Lfo`'s own default rather than a second copy of the
+    // numbers, so there is one answer to what an untouched drawn shape is.
+    const lfo::Lfo defaults;
+    for (int i = 0; i < lfo::customSteps; ++i)
+        lfoShape[i].store (defaults.table[i]);
 }
 
 int BP303AudioProcessor::loadGlobalSkin (int fallback)
@@ -480,7 +486,115 @@ juce::AudioProcessorValueTreeState::ParameterLayout BP303AudioProcessor::createP
     layout.add (std::make_unique<AudioParameterBool> (
         ParameterID { "padlatch", 1 }, "Pad Latch", false));
 
+    // LFO 1. Appended for the usual reason, and off with zero depth and no
+    // destination, which is the setting that costs nothing: `lfo::Lfo::active`
+    // is false three ways over, `apply` hands the base value back untouched,
+    // and processBlock never enters the chunk loop at all — so an instance that
+    // has never been touched is bit-identical to one built before the LFO
+    // existed. `Tools/lfo_wire_test.cpp` pins that.
+    //
+    // Unlike the pad, the destination is a parameter rather than a hardwired
+    // mode, so its choice order is save-file compatibility and may only grow at
+    // the end. See lfoDests().
+    layout.add (std::make_unique<AudioParameterBool> (
+        ParameterID { "lfo1on", 1 }, "LFO 1 Active", false));
+
+    layout.add (std::make_unique<AudioParameterChoice> (
+        ParameterID { "lfo1shape", 1 }, "LFO 1 Shape",
+        StringArray { "SINE", "TRI", "SAW", "SQR", "S+H", "DRAW" }, lfo::Sine));
+
+    layout.add (std::make_unique<AudioParameterBool> (
+        ParameterID { "lfo1sync", 1 }, "LFO 1 Sync", true));
+
+    // Only meaningful with DRAW selected: it runs a line through the drawn
+    // steps instead of stepping between them. A parameter rather than editor
+    // state because it changes what is heard.
+    layout.add (std::make_unique<AudioParameterBool> (
+        ParameterID { "lfo1smooth", 1 }, "LFO 1 Smooth", false));
+
+    // How many of the sixteen drawn steps the loop runs before repeating. A
+    // single integer, so unlike the table itself it *is* a parameter — a host
+    // can automate the loop length, which is worth having. Default sixteen is
+    // the whole table, so a project that predates this opens looping the full
+    // shape exactly as it did.
+    layout.add (std::make_unique<AudioParameterInt> (
+        ParameterID { "lfo1len", 1 }, "LFO 1 Draw Length", 2, lfo::customSteps,
+        lfo::customSteps));
+
+    // Free-running rate. Skewed like the cutoff knob so the slow end — where a
+    // sweep lives — gets most of the travel instead of being crushed into the
+    // first eighth of it.
+    layout.add (std::make_unique<AudioParameterFloat> (
+        ParameterID { "lfo1rate", 1 }, "LFO 1 Rate",
+        NormalisableRange<float> (0.05f, 20.0f, 0.0f, 0.3f), 2.0f));
+
+    layout.add (std::make_unique<AudioParameterChoice> (
+        ParameterID { "lfo1div", 1 }, "LFO 1 Division",
+        StringArray { "1 BAR", "1/2", "1/4", "1/8", "1/16" }, lfo::Eighth));
+
+    layout.add (std::make_unique<AudioParameterChoice> (
+        ParameterID { "lfo1dest", 1 }, "LFO 1 Destination",
+        StringArray { "CUT OFF", "RESONANCE", "ENV MOD",
+                      "DIST DRIVE", "DIST COLOR", "DIST LOWS",
+                      "DELAY MIX", "DELAY FB",
+                      "REVERB MIX", "REVERB SIZE",
+                      "DRUM DRIVE", "DRUM FILTER" }, 0));
+
+    // Bipolar, and zero by default: a routing chosen without a depth still
+    // sounds like nothing, which is what makes picking a destination safe.
+    layout.add (std::make_unique<AudioParameterFloat> (
+        ParameterID { "lfo1amt", 1 }, "LFO 1 Amount",
+        NormalisableRange<float> (-1.0f, 1.0f), 0.0f));
+
     return layout;
+}
+
+// The `lfo1dest` choice list, as destinations. Index order is what a saved
+// project stores, so entries may only be appended — reordering would re-point
+// every routing that has ever been saved at a different knob.
+// It is `macropad::Dest`'s own order, which is not an accident worth undoing:
+// the pad's table is the one place a destination's range is written down, and
+// keeping the two lists in the same order is what makes it obvious at a glance
+// that neither has grown an entry the other lacks.
+const macropad::Dest* BP303AudioProcessor::lfoDests()
+{
+    static const macropad::Dest d[] = {
+        macropad::Cutoff,    macropad::Resonance, macropad::EnvMod,
+        macropad::DistDrive, macropad::DistColor, macropad::DistLows,
+        macropad::DelayMix,  macropad::DelayFb,
+        macropad::RevMix,    macropad::RevSize,
+        macropad::DrumDrive, macropad::DrumFltCut
+    };
+    static_assert (sizeof (d) / sizeof (d[0]) == macropad::numDests,
+                   "every pad destination should be reachable by an LFO too");
+    return d;
+}
+
+int BP303AudioProcessor::numLfoDests() { return macropad::numDests; }
+
+lfo::Lfo BP303AudioProcessor::readLfo() const
+{
+    lfo::Lfo l;
+    l.on     = apvts.getRawParameterValue ("lfo1on")->load() >= 0.5f;
+    l.shape  = (int) apvts.getRawParameterValue ("lfo1shape")->load();
+    l.sync   = apvts.getRawParameterValue ("lfo1sync")->load() >= 0.5f;
+    l.rateHz = apvts.getRawParameterValue ("lfo1rate")->load();
+    l.div    = (int) apvts.getRawParameterValue ("lfo1div")->load();
+    l.depth  = apvts.getRawParameterValue ("lfo1amt")->load();
+    l.smooth = apvts.getRawParameterValue ("lfo1smooth")->load() >= 0.5f;
+    l.customLength = (int) apvts.getRawParameterValue ("lfo1len")->load();
+
+    // Copied rather than referenced: `Lfo` is a value the audio thread takes
+    // once a block and then reads many times per block through `apply`, and a
+    // table that changed underneath it mid-block would put a step boundary
+    // somewhere the shape does not have one.
+    for (int i = 0; i < lfo::customSteps; ++i)
+        l.table[i] = lfoShape[i].load();
+
+    const int idx = (int) apvts.getRawParameterValue ("lfo1dest")->load();
+    l.dest = idx >= 0 && idx < numLfoDests() ? lfoDests()[idx] : macropad::numDests;
+
+    return l;
 }
 
 macropad::Pad BP303AudioProcessor::readPad() const
@@ -1098,6 +1212,19 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     const auto pad = readPad();
     const unsigned padUnits = pad.forcedUnits();
 
+    // The LFO composes *on top of* the pad rather than competing with it: the
+    // pad's offset is folded into the base values below, and the LFO offsets
+    // that. Both are displacements from the knob, so the order they are applied
+    // in only matters at the clamps.
+    const auto lfoState = readLfo();
+
+    // Both modulators engage the units they need, and neither writes the ACTIVE
+    // parameter — the switch reads the same after the gesture as before it. The
+    // pad's are momentary, the LFO's last as long as the routing does; see
+    // Lfo.h for why that difference stopped being a reason to treat them
+    // differently.
+    const unsigned units = padUnits | lfoState.forcedUnits();
+
     const float pTuning = apvts.getRawParameterValue ("tuning")->load();
     const float pCutoff = pad.apply (macropad::Cutoff,
                                      apvts.getRawParameterValue ("cutoff")->load());
@@ -1208,6 +1335,116 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     // sequencers snap to it, so a line toggled on mid-pattern lands on the shared
     // grid instead of restarting from step 0 out of phase with the others.
     const double transportPhase = (hostPlaying && hasPpq) ? ppq : recPhaseStart;
+
+    // --- LFO 1 ---------------------------------------------------------------
+    // Synced, the phase is *derived* from the transport rather than counted, so
+    // a host loop or a playhead jump lands the LFO where the bar says it should
+    // be instead of wherever an accumulator happened to get to. `transportPhase`
+    // is already the host's ppq when there is one and the internal RUN clock
+    // otherwise, so both are covered by reading it.
+    //
+    // ...but only while something is actually rolling. Stopped, `transportPhase`
+    // sits at 0 on every block, so deriving from it would restart the LFO at
+    // phase 0 every block and sweep only the `rate * blockSize` inside one —
+    // about 5% of a cycle at a 1/8 sync, snapping back at each boundary. That is
+    // a buzz, not a sweep, and since `lfo1sync` defaults to on it is the state
+    // an LFO switched on over a stopped transport lands in. It reads as "the LFO
+    // is broken" rather than as "the LFO is waiting", so a stopped transport
+    // falls back to free-running at the synced rate. Starting playback snaps it
+    // back onto the bar, which is the behaviour that matters once it matters.
+    const bool   lfoLive    = lfoState.active();
+    const double lfoRate    = lfoState.rate (bpm, sampleRateHz);
+    const bool   lfoDerived = lfoState.sync && running;
+    const double lfoBase    = lfoDerived ? lfoState.phaseFromBeats (transportPhase)
+                                         : lfoFreePhase.load();
+
+    // Advanced whether or not the LFO is live, so switching one on mid-note
+    // starts it from where a running oscillator would be rather than from zero.
+    // Wrapped to keep the double from growing without bound over a long session.
+    if (! lfoDerived)
+    {
+        const double p = lfoFreePhase.load() + lfoRate * (double) numSamples;
+        lfoFreePhase.store (p - std::floor (p));
+    }
+
+    lfoPhaseNow.store (lfoBase - std::floor (lfoBase));
+
+    // Renders `n` samples through a voice, re-evaluating the LFO every
+    // `lfo::modChunk` samples. With no LFO live it is the bare render call and
+    // no setParams at all — not merely the same result but the same arithmetic
+    // every project predating the LFO took, which is the only way the identity
+    // survives the skew round trip inside `apply`. Same not-computing-it trick
+    // as the flat-EQ branch and `DrumSequencer::laneClock`.
+    //
+    // `at` is the offset into the block, so chunks stay tied to the block's own
+    // timeline rather than restarting at each MIDI event split.
+    const auto renderVoice = [&] (Synth303& v, float* l, float* r, int n, int at)
+    {
+        if (! lfoLive)
+        {
+            v.render (l, r, n);
+            return;
+        }
+
+        for (int i = 0; i < n; i += lfo::modChunk)
+        {
+            const double ph = lfoBase + lfoRate * (double) (at + i);
+            v.setParams (wave, pTuning,
+                         lfoState.apply (macropad::Cutoff,    pCutoff, ph),
+                         lfoState.apply (macropad::Resonance, pRes,    ph),
+                         lfoState.apply (macropad::EnvMod,    pEnvMod, ph),
+                         pDecay, pAccent, pVol, pVibSpd, pVibDep, pAttack);
+            v.render (l + i, r + i, std::min (lfo::modChunk, n - i));
+        }
+    };
+
+    // Is the LFO reaching this control at all? The FX units below each ask for
+    // their own destinations, so a unit nothing is routed to keeps the single
+    // whole-block call it has always made.
+    const auto lfoReaches = [&] (macropad::Dest d)
+    {
+        return lfoLive && lfoState.dest == d;
+    };
+
+    // Both modulators folded into one value: the pad displaces the knob, the
+    // LFO displaces that. Each hands the base straight back when it is not
+    // reaching this destination, so an untouched instance computes neither and
+    // the value is the parameter's own, bit for bit.
+    const auto modulate = [&] (macropad::Dest d, float base, double ph)
+    {
+        return lfoState.apply (d, pad.apply (d, base), ph);
+    };
+
+    // Runs one FX unit over the block, re-setting its parameters every
+    // `lfo::modChunk` samples while an LFO reaches one of its controls — and
+    // otherwise making the one setParams and the one whole-block process call
+    // the chain has always made. Same branch, and the same reason for it, as
+    // renderVoice above.
+    //
+    // Chunking each unit independently rather than the chain as a whole works
+    // because the units run in sequence over the same buffer: slicing one
+    // changes nothing about how the others see it. It also keeps the cost on
+    // the unit actually being modulated instead of on all thirteen.
+    //
+    // Safe to call a unit's setParams repeatedly because every unit here gates
+    // its state-clearing on a *transition* — `on && ! prevOn`, or a type change
+    // — so calling it eight times with the same switch position clears nothing.
+    // A unit that reset unconditionally could not be driven this way.
+    const auto runFx = [&] (bool modulated, auto&& setAt, auto&& processAt)
+    {
+        if (! modulated)
+        {
+            setAt (0.0);
+            processAt (0, numSamples);
+            return;
+        }
+
+        for (int i = 0; i < numSamples; i += lfo::modChunk)
+        {
+            setAt (lfoBase + lfoRate * (double) i);
+            processAt (i, std::min (lfo::modChunk, numSamples - i));
+        }
+    };
 
     // --- song mode: the arrangement picks the patterns ----------------------
     // Song position is derived from the transport phase rather than counted as
@@ -1373,14 +1610,14 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
         int pos = 0;
         for (const auto& e : seqEvents)
         {
-            synth.render (left + pos, right + pos, e.offset - pos);
+            renderVoice (synth, left + pos, right + pos, e.offset - pos, pos);
             pos = e.offset;
             if (e.noteOn)
                 synth.noteOn (e.note, e.dyn, e.slide);
             else
                 synth.noteOff (e.note);
         }
-        synth.render (left + pos, right + pos, numSamples - pos);
+        renderVoice (synth, left + pos, right + pos, numSamples - pos, pos);
 
         // Live-monitor voice: play the notes you press over the sequence so you
         // hear yourself while auditioning / recording. Drums already trigger
@@ -1402,7 +1639,7 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
             if (msg.getChannel() == 10)
                 continue;   // drums, not bass
             const int eventTime = juce::jlimit (0, numSamples, metadata.samplePosition);
-            monitorSynth.render (mbuf + mpos, mbufR + mpos, eventTime - mpos);
+            renderVoice (monitorSynth, mbuf + mpos, mbufR + mpos, eventTime - mpos, mpos);
             mpos = eventTime;
             if (msg.isNoteOn())
                 monitorSynth.noteOn (msg.getNoteNumber(),
@@ -1413,7 +1650,7 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
             else if (msg.isAllNotesOff() || msg.isAllSoundOff())
                 monitorSynth.allNotesOff();
         }
-        monitorSynth.render (mbuf + mpos, mbufR + mpos, numSamples - mpos);
+        renderVoice (monitorSynth, mbuf + mpos, mbufR + mpos, numSamples - mpos, mpos);
         juce::FloatVectorOperations::add (left,  mbuf,  numSamples);
         juce::FloatVectorOperations::add (right, mbufR, numSamples);
     }
@@ -1424,12 +1661,12 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
         {
             const auto msg = metadata.getMessage();
             const int eventTime = juce::jlimit (0, numSamples, metadata.samplePosition);
-            synth.render (left + pos, right + pos, eventTime - pos);
+            renderVoice (synth, left + pos, right + pos, eventTime - pos, pos);
             pos = eventTime;
             if (msg.getChannel() != 10)   // channel 10 is reserved for drums
                 handleMidiEvent (msg);
         }
-        synth.render (left + pos, right + pos, numSamples - pos);
+        renderVoice (synth, left + pos, right + pos, numSamples - pos, pos);
 
         // Ext mode has no monitor loop, but the step-grid keyboard can still
         // audition notes through the monitor voice.
@@ -1439,7 +1676,7 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
             monBufferR.resize ((size_t) numSamples);
         std::fill_n (monBuffer.begin(), numSamples, 0.0f);
         std::fill_n (monBufferR.begin(), numSamples, 0.0f);
-        monitorSynth.render (monBuffer.data(), monBufferR.data(), numSamples);
+        renderVoice (monitorSynth, monBuffer.data(), monBufferR.data(), numSamples, 0);
         juce::FloatVectorOperations::add (left,  monBuffer.data(),  numSamples);
         juce::FloatVectorOperations::add (right, monBufferR.data(), numSamples);
     }
@@ -1466,29 +1703,37 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
                           apvts.getRawParameterValue ("bfltenv")->load());
     bassFilter.process (left, right, numSamples);
 
-    {
-        // GRIT reaches the shaper. Its `on` is OR'd rather than written, so the
-        // pad can engage a unit for the length of a gesture without disturbing
-        // the ACTIVE switch the user set.
-        auto dp = distParams (bassDistIds);
-        dp.on       = dp.on || (padUnits & macropad::uBassDist) != 0;
-        dp.drive    = pad.apply (macropad::DistDrive, dp.drive);
-        dp.color    = pad.apply (macropad::DistColor, dp.color);
-        dp.lowsKept = pad.apply (macropad::DistLows,  dp.lowsKept);
-        bassDist.setParams (dp);
-    }
-    bassDist.process (left, right, numSamples);
+    // GRIT reaches the shaper. Its `on` is OR'd rather than written, so the pad
+    // can engage a unit for the length of a gesture without disturbing the
+    // ACTIVE switch the user set. The LFO deliberately does not do that — see
+    // Lfo.h — so a routing here is silent until DIST ACTIVE is on.
+    runFx (lfoReaches (macropad::DistDrive) || lfoReaches (macropad::DistColor)
+               || lfoReaches (macropad::DistLows),
+           [&] (double ph)
+           {
+               auto dp = distParams (bassDistIds);
+               dp.on       = dp.on || (units & macropad::uBassDist) != 0;
+               dp.drive    = modulate (macropad::DistDrive, dp.drive,    ph);
+               dp.color    = modulate (macropad::DistColor, dp.color,    ph);
+               dp.lowsKept = modulate (macropad::DistLows,  dp.lowsKept, ph);
+               bassDist.setParams (dp);
+           },
+           [&] (int at, int n) { bassDist.process (left + at, right + at, n); });
 
-    fx.setParams (apvts.getRawParameterValue ("delayon")->load() >= 0.5f
-                      || (padUnits & macropad::uBassDelay) != 0,
-                  (int) apvts.getRawParameterValue ("delaytype")->load(),
-                  (int) apvts.getRawParameterValue ("delaytime")->load() + 1,
-                  pad.apply (macropad::DelayFb,
-                             apvts.getRawParameterValue ("delayfb")->load()),
-                  pad.apply (macropad::DelayMix,
-                             apvts.getRawParameterValue ("delaymix")->load()),
-                  bpm);
-    fx.process (left, right, numSamples);
+    runFx (lfoReaches (macropad::DelayFb) || lfoReaches (macropad::DelayMix),
+           [&] (double ph)
+           {
+               fx.setParams (apvts.getRawParameterValue ("delayon")->load() >= 0.5f
+                                 || (units & macropad::uBassDelay) != 0,
+                             (int) apvts.getRawParameterValue ("delaytype")->load(),
+                             (int) apvts.getRawParameterValue ("delaytime")->load() + 1,
+                             modulate (macropad::DelayFb,
+                                       apvts.getRawParameterValue ("delayfb")->load(), ph),
+                             modulate (macropad::DelayMix,
+                                       apvts.getRawParameterValue ("delaymix")->load(), ph),
+                             bpm);
+           },
+           [&] (int at, int n) { fx.process (left + at, right + at, n); });
 
     bassComp.setParams (apvts.getRawParameterValue ("bcompon")->load() >= 0.5f,
                         apvts.getRawParameterValue ("bcompthr")->load(),
@@ -1502,14 +1747,19 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
                           apvts.getRawParameterValue ("bchrmix")->load());
     bassChorus.process (left, right, numSamples);
 
-    bassReverb.setParams (apvts.getRawParameterValue ("brevon")->load() >= 0.5f
-                              || (padUnits & macropad::uBassRev) != 0,
-                          pad.apply (macropad::RevSize,
-                                     apvts.getRawParameterValue ("brevsize")->load()),
-                          apvts.getRawParameterValue ("brevdamp")->load(),
-                          pad.apply (macropad::RevMix,
-                                     apvts.getRawParameterValue ("brevmix")->load()));
-    bassReverb.process (left, right, numSamples);
+    runFx (lfoReaches (macropad::RevSize) || lfoReaches (macropad::RevMix),
+           [&] (double ph)
+           {
+               bassReverb.setParams (
+                   apvts.getRawParameterValue ("brevon")->load() >= 0.5f
+                       || (units & macropad::uBassRev) != 0,
+                   modulate (macropad::RevSize,
+                             apvts.getRawParameterValue ("brevsize")->load(), ph),
+                   apvts.getRawParameterValue ("brevdamp")->load(),
+                   modulate (macropad::RevMix,
+                             apvts.getRawParameterValue ("brevmix")->load(), ph));
+           },
+           [&] (int at, int n) { bassReverb.process (left + at, right + at, n); });
 
     {
         float gains[GraphicEq::numBands];
@@ -1609,23 +1859,30 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
 
         // Drum line FX chain: filter -> distortion -> delay -> compressor
         // -> chorus -> reverb, mirroring the bass line.
-        drumFilter.setParams (apvts.getRawParameterValue ("dflton")->load() >= 0.5f
-                                  || (padUnits & macropad::uDrumFilt) != 0,
-                              (int) apvts.getRawParameterValue ("dfltmode")->load(),
-                              pad.apply (macropad::DrumFltCut,
-                                         apvts.getRawParameterValue ("dfltcut")->load()),
-                              apvts.getRawParameterValue ("dfltres")->load(),
-                              apvts.getRawParameterValue ("dfltenv")->load());
-        drumFilter.process (dbuf, dbufR, numSamples);
+        runFx (lfoReaches (macropad::DrumFltCut),
+               [&] (double ph)
+               {
+                   drumFilter.setParams (
+                       apvts.getRawParameterValue ("dflton")->load() >= 0.5f
+                           || (units & macropad::uDrumFilt) != 0,
+                       (int) apvts.getRawParameterValue ("dfltmode")->load(),
+                       modulate (macropad::DrumFltCut,
+                                 apvts.getRawParameterValue ("dfltcut")->load(), ph),
+                       apvts.getRawParameterValue ("dfltres")->load(),
+                       apvts.getRawParameterValue ("dfltenv")->load());
+               },
+               [&] (int at, int n) { drumFilter.process (dbuf + at, dbufR + at, n); });
 
         // Drive on the drum bus, ahead of the delay so the echoes stay gritty
-        {
-            auto dp = distParams (drumDistIds);
-            dp.on    = dp.on || (padUnits & macropad::uDrumDist) != 0;
-            dp.drive = pad.apply (macropad::DrumDrive, dp.drive);
-            drumDist.setParams (dp);
-        }
-        drumDist.process (dbuf, dbufR, numSamples);
+        runFx (lfoReaches (macropad::DrumDrive),
+               [&] (double ph)
+               {
+                   auto dp = distParams (drumDistIds);
+                   dp.on    = dp.on || (units & macropad::uDrumDist) != 0;
+                   dp.drive = modulate (macropad::DrumDrive, dp.drive, ph);
+                   drumDist.setParams (dp);
+               },
+               [&] (int at, int n) { drumDist.process (dbuf + at, dbufR + at, n); });
 
         drumFx.setParams (apvts.getRawParameterValue ("ddelayon")->load() >= 0.5f,
                           (int) apvts.getRawParameterValue ("ddelaytype")->load(),
@@ -1718,6 +1975,15 @@ void BP303AudioProcessor::getStateInformation (juce::MemoryBlock& destData)
     if (auto params = apvts.copyState().createXml())
         root.addChildElement (params.release());
 
+    // The drawn LFO shape rides with the patterns rather than with the
+    // parameters, because that is what it is — data the user drew, not a
+    // control a host should be automating sixteen lanes of.
+    {
+        auto* shape = root.createNewChildElement ("LFOSHAPE");
+        for (int i = 0; i < lfo::customSteps; ++i)
+            shape->setAttribute ("s" + juce::String (i), (double) lfoShape[i].load());
+    }
+
     // capture live edits into the current slots before serializing the banks
     saveBassPatternTo (bassPatterns[(size_t) currentBassPattern.load()]);
     saveDrumPatternTo (drumPatterns[(size_t) currentDrumPattern.load()]);
@@ -1771,6 +2037,19 @@ void BP303AudioProcessor::setStateInformation (const void* data, int sizeInBytes
 
         if (auto* params = xml->getChildByName (apvts.state.getType()))
             apvts.replaceState (juce::ValueTree::fromXml (*params));
+
+        // Absent — every project that predates DRAW — the constructor's default
+        // sine stands, so an old project opens with a drawable shape already in
+        // it rather than a flat line.
+        if (auto* shape = xml->getChildByName ("LFOSHAPE"))
+        {
+            const lfo::Lfo defaults;
+            for (int i = 0; i < lfo::customSteps; ++i)
+                lfoShape[i].store ((float) juce::jlimit (
+                    -1.0, 1.0,
+                    shape->getDoubleAttribute ("s" + juce::String (i),
+                                               (double) defaults.table[i])));
+        }
 
         for (auto& p : bassPatterns) p = BassPattern {};
         for (auto& p : drumPatterns) p = DrumPattern {};

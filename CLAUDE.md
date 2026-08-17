@@ -37,7 +37,7 @@ behind `BP303_HAS_NATIVE_WINDOW` with an inline no-op fallback the way
 
 Two kinds, both headless. Run both before calling anything done.
 
-**CMake targets** — 36 of them, one per `Tools/*_test.cpp` that is wired up:
+**CMake targets** — 41 of them, one per `Tools/*_test.cpp` that is wired up:
 
 ```bash
 cmake --build build -j8 && for t in build/BP303_*Test_artefacts/Release/BP303_*Test; do "$t" >/dev/null || echo "FAIL $t"; done
@@ -55,20 +55,23 @@ Tests print a trailing `OK` / `ALL PASS` line and set the exit code. Some also
 write PNG or WAV output into the working directory for eyeballing; that output is
 gitignored.
 
-CI runs only the sixteen JUCE-free targets — `WaveTest`, `DistTest`, `MasterTest`,
-`DynFiltTest`, `SpaceTest`, `SongTest`, `RepeatTest`, `AttackTest`,
+CI runs only the eighteen JUCE-free targets — `WaveTest`, `DistTest`,
+`MasterTest`, `DynFiltTest`, `SpaceTest`, `SongTest`, `RepeatTest`, `AttackTest`,
 `DrumDecayTest`, `StereoBusTest`, `UnisonTest`, `PolymeterTest`, `EqTest`,
-`GateSplitTest`, `BassMeterTest`, `PadTest` — on both platforms, because a
-failure in those is a real portability bug rather than a headless-runner
-artefact. The rest are a local macOS run, so they are still on you.
+`GateSplitTest`, `BassMeterTest`, `PadTest`, `LfoRateTest`, `LfoTest` — on both
+platforms, because a failure in those is a real portability bug rather than a
+headless-runner artefact. The rest are a local macOS run, so they are still on
+you.
 
 `BP303_Snapshot`, `BP303_FxTabSnapshot`, `BP303_DrumTabSnapshot`,
-`BP303_EqTabSnapshot` and `BP303_PadTabSnapshot` render the editor to PNG — the
-way to check UI work without opening a host. The EQ one dials a curve in and
-renders a second of audio first, because its meters are the only part of the
-editor that shows nothing at all until something has played; the pad one holds
-the pad off centre, for the same reason. `BP303_PerfBench` measures repaint
-cost, and now also what the EQ costs flat, driven, and with its meters running.
+`BP303_EqTabSnapshot`, `BP303_PadTabSnapshot` and `BP303_LfoSnapshot` render the
+editor to PNG — the way to check UI work without opening a host. The EQ one dials
+a curve in and renders a second of audio first, because its meters are the only
+part of the editor that shows nothing at all until something has played; the pad
+one holds the pad off centre, and the LFO one runs a few blocks so the scope's
+dot has a phase to sit at, both for the same reason. `BP303_PerfBench` measures
+repaint cost, and now also what the EQ costs flat, driven, and with its meters
+running — it does *not* yet cover a running LFO's scope and rings.
 
 ## Layout
 
@@ -381,6 +384,174 @@ allocating on a 25 Hz timer.
 with the message loop running between the moves — the sparks come off the timer,
 so they cannot be posed, and that snapshot is the only way to see them without a
 host. It is the one target built with `JUCE_MODAL_LOOPS_PERMITTED`.
+
+**The LFO is the pad's model with a chosen destination, and one measured
+number.** `Lfo.h` borrows `macropad::Dest` and `macropad::range` rather than
+declaring its own table — there is one set of answers to "what does a normalised
+offset mean on this parameter", `pad_test` already checks that set against
+`createParameterLayout`, and a second copy would only be a second thing to keep
+in step. It offsets rather than writes for the same reasons the pad does, and
+`apply` takes the same identity shortcut: inactive, it hands the base value back
+without touching the skew round trip.
+
+Being inactive has *three* forms — switched off, routed nowhere, zero depth —
+and all three are states a real patch sits in, so all three take that path.
+`Tools/lfo_test.cpp` pins the arithmetic and `Tools/lfo_wire_test.cpp` pins the
+end-to-end render bit-identical for each.
+
+**Phase is derived from the transport when synced, never accumulated.** Same
+reasoning as `SongPlayer`: an accumulator drifts out of step the moment the host
+loops or the playhead jumps, and a synced LFO that no longer lines up with the
+bar after a loop is worse than no sync. Only free-running keeps state, and
+sample & hold is a hash of the cycle index rather than a running random for
+exactly the same reason — a loop must not re-randomise a pattern.
+
+**...but only while something is rolling.** A stopped transport reports beat 0
+on every block, so deriving from it restarts the LFO at phase 0 each block and
+sweeps only the `rate * blockSize` that fits inside one — about 5% of a cycle at
+a 1/8 sync. That is a buzz, not a sweep, and since sync defaults to on it is the
+state an LFO switched on over a stopped transport lands in. So `lfoDerived` is
+`sync && running`, and a stopped transport free-runs at the synced rate instead.
+The trap in testing it is that "differs from an unmodulated render" passes on
+the broken version too — a stutter differs just as surely as a sweep does, which
+is why `lfo_wire_test` measures how far the modulation *reaches*.
+
+**The LFO engages its destination's unit, and this was got wrong first.** It was
+built not forcing, reasoning that the pad's gesture is momentary where an LFO is
+persistent, so forcing would hold a unit on indefinitely and leave the ACTIVE
+lamp reporting something untrue.
+
+That is a cosmetic problem with a UI fix, and it was weighed above a real one: a
+routing to DRUM FILTER on an instrument whose drum filter is bypassed is silent,
+and silent is indistinguishable from broken. It cost two sessions of debugging a
+plugin that was behaving exactly as written. `macropad::unitFor` answers "which
+unit does this destination live in" per destination — the pad's `spec().units`
+answers it per mode — and `pad_test` checks the two agree rather than letting
+them become second opinions.
+
+As with the pad, the ACTIVE *parameter* is never written; the unit's `on` is
+OR'd for as long as the routing is live, so the switch reads the same afterwards.
+`lfo_wire_test` pins both halves for every destination.
+
+**`lfo::modChunk` is 64 because it was measured, not because the EQ uses 32.**
+While an LFO is live, `processBlock` renders the voice in `modChunk` pieces and
+re-sets its parameters at each — and while none is, it takes the bare
+whole-block call it always did. That branch is the whole identity guarantee, so
+don't "simplify" it into always chunking.
+
+Each FX unit is chunked *independently*, through `runFx`, and asks only about
+its own destinations. The units run in sequence over the same buffer, so slicing
+one changes nothing about how the others see it — which keeps the cost on the
+unit being modulated instead of on all thirteen. It is safe to call a unit's
+`setParams` eight times a block only because every unit gates its state-clearing
+on a transition (`on && ! prevOn`, or a type change); a unit that reset
+unconditionally could not be driven this way, and adding one would break the
+delay and the reverb quietly.
+
+The size came out of `Tools/lfo_rate_test.cpp`, which renders the ladder under a
+stepped cutoff at every interval and writes the lot out as WAVs. By ear, at a
+1/16 sweep, 128 was indistinguishable from per-sample while 512 and 1024 comb
+audibly — the artefact reads as comb filtering rather than as stepping, because
+sampling the modulator at 43 Hz puts sidebands either side of everything the
+filter passes. 64 is one step inside what was confirmed, which is what buys the
+1/32 division at a transparency actually tested rather than extrapolated.
+
+Two traps that test records. Its cents column ranks intervals correctly and is
+useless as an absolute scale — the bar turned out to be nearer 900 cents than
+the 10-20 a rule of thumb predicts, because the big jumps land at the top of the
+sweep where they matter least. And the reason 64 can be coarser than `Eq.h`'s 32
+at all is topology: a ZDF ladder has no term carrying the old coefficients, and
+a direct-form biquad does.
+
+**The LFO row is a plain titled panel, and the scope is what earns its height.**
+It sits between row 2 and the drums row, so the two modulators — the pad and the
+LFO — are not separated by the whole kit. A plain panel rather than an
+`FxSection`: a tab bar with one tab costs 18px of a 90px row and offers nothing
+to click, and when LFO 2 and 3 arrive they go *beside* LFO 1 across the row
+rather than behind tabs, because a source you have to reveal is no use as a drag
+source.
+
+`LfoScope` draws the shape from `lfo::Lfo::valueAt` itself and rides a dot on it
+at the phase `processBlock` published, so it cannot show a wave the DSP is not
+producing — the same rule `EqBands` follows in taking its curve from the audio
+path's own coefficients. It answers the two questions the controls cannot:
+whether the thing is moving, and where in its cycle it is.
+
+Sample & hold is the one shape the scope draws differently, and it has to be.
+Its cycle is one held value, so a one-cycle window draws a flat line —
+truthfully and uselessly. It gets a four-cycle window *anchored to the last four
+real holds*, because the value is a hash of the cycle index: drawing cycles 0-3
+while the audio is on cycle 97 would be a plausible random pattern that is not
+the one being played.
+
+**A drawn shape is sixteen steps, and the scope is the editor.** DRAW picks
+`lfo::Custom`, and the scope you were already watching becomes the surface you
+paint into — the same drag-to-paint gesture `DrumGrid` uses, with the phase dot
+still riding the shape so you draw with the playhead visible. Sixteen because
+that is what this instrument counts in everywhere else; a modulator on its own
+grid would be a second vocabulary for nothing. SMOOTH runs a line through the
+points instead of stepping between them, and it wraps from the last step back to
+the first so a looping shape has no seam.
+
+**The drawn loop can end early, and that is polymeter — `laneLength` for the
+LFO.** `lfo1len` (2..16) is how many of the sixteen steps the loop runs before
+repeating, dragged from an end marker in the scope. Each step keeps its
+duration, so a short loop repeats faster and drifts against the bar exactly the
+way a short drum lane does; a length that divides sixteen evenly stays on the
+grid. `rate` and `phaseFromBeats` both scale by `customSteps / loopSteps`, which
+is what keeps a synced short loop *locked* to the beat it drifts against rather
+than merely running at the right average speed. For every non-drawn shape that
+factor is 16/16 = 1 exactly, so their timing is bit-identical — `lfo_test` pins
+that. Unlike the table, the length is a single scalar, so it *is* a parameter and
+a host can automate it.
+
+The scope draws slots, not time, here too: all sixteen steps keep their column
+whatever the loop length, the loop plays across the columns up to the marker, and
+the steps past it stay visible and editable, dimmed. Drawing the loop stretched
+to full width would hide the steps outside it and leave the marker mid-column
+with nothing to point at — the same trade the fitted drum lane took. The marker
+and step-painting are two gestures on one surface, split on `mouseDown` by
+distance to the marker, the way `DrumGrid`'s lane handle coexists with cell
+painting; `lfo_draw_test` pins the two apart.
+
+The table is *not* a parameter. It is data the user drew, like a pattern, so it
+saves with the patterns as `<LFOSHAPE>` rather than becoming sixteen automation
+lanes nobody wants. The editor writes it and the audio thread reads it through
+plain atomics, the way `DrumSequencer::stepMask` already works — a torn read
+mixes two valid tables for one chunk, which is inaudible, and a lock on the
+audio thread would be the real bug. `readLfo` copies the table into the `Lfo`
+value once a block so it cannot change under `apply` mid-block.
+
+Its default is a sine sampled at sixteen steps rather than zeros, for the same
+reason the LFO forces its units: a DRAW that started flat would be silent, and
+silent is indistinguishable from broken.
+
+The knob rings reuse the pad's `padOffset` property rather than adding a second
+indicator — two systems on one knob would need every skin to know about both,
+and the whole point of putting the offset inside `drawRotarySlider` was that no
+skin knows about any of it. `updatePadKnobs` composes pad then LFO in the order
+the audio thread composes them, so the ring includes the clamping.
+
+They are driven from `LfoScope`'s own 25 Hz tick, not the pad's: the pad's timer
+only calls `onPadMoved` while the pad is moving, so an LFO's rings would sit
+still while the sound moved. The transition to inactive reaches the callback
+too, which is what clears a stale ring off a knob the LFO has stopped pushing.
+A still LFO repaints nothing and `BP303_PerfBench` still reports 0.0% stopped
+and untouched.
+
+**Adding a row means editing the layout twice.** `layoutContent` places the
+children and `paintContent` draws the panel frames, and they are separate walks
+over the same rows. A row added to one and not the other slides every frame
+below it out from under its contents without moving the contents — which is what
+happened, and it is invisible until something is rendered. `BP303_Snapshot` is
+how you see it.
+
+**A taller window is a scaled window, and that broke a test that assumed
+otherwise.** The editor scales its content to whatever the host gives it, and at
+988px native the default size is scaled below 1 — so `hold_test`'s
+`createComponentSnapshot (button->getBounds())` started sampling the wrong
+pixels and reported that arming HOLD lit nothing. Snapshot regions taken from a
+child have to go through `getLocalArea` rather than being passed straight in.
 
 **The help tour is UI too, and `BP303_HelpSnapshot` is how you check it.** It
 walks every step to PNG. The failure it catches is not a compile error: the
