@@ -48,6 +48,15 @@ target_compile_definitions(BP303 PUBLIC
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0)
+    # NOTE: do NOT enable JUCE_COREGRAPHICS_RENDER_WITH_MULTIPLE_PAINT_CALLS here.
+    # It was tried to stop macOS coalescing the editor's scattered dirty rects
+    # into whole-window paints, but inside Logic's AU host the Metal layer it
+    # creates never drives its `displayLayer` callback — which is the *only* place
+    # `deferredRepaints` is cleared when a metalRenderer exists (see
+    # juce_NSViewComponentPeer_mac.mm setNeedsDisplayRectangles). The list then
+    # grows without bound and CPU creeps past 50% the longer the window is open.
+    # It also never actually improved the coalescing in Logic. The editor's CPU
+    # is instead managed by ui303::animHz (frame rate) and knob image caching.
 
 # Native host-window centring (Objective-C++). Only the plugin gets the real
 # implementation; the console tools fall back to the header's inline no-op.

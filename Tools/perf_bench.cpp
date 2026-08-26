@@ -205,6 +205,15 @@ namespace
         auto* drumGrid = findDescendant<DrumGrid> (*editor);
         auto* songList = findDescendant<SongList> (*editor);
         auto* keys     = findDescendant<PatternKeys> (*editor);
+        auto* lfoScope = findDescendant<LfoScope> (*editor);
+        auto* xyPad    = findDescendant<XyPad> (*editor);
+
+        // Every animating part of the editor — meters, LFO dot, XY pad, and the
+        // playhead grids — shares this rate. See ui303::animHz for why it is one
+        // number: the macOS compositor fuses their separate dirty rects into a
+        // whole-window paint, so what matters is frames per second, not which
+        // part moved.
+        constexpr double modHz = ui303::animHz;
 
         // A child's repaint invalidates that rectangle of the window, which
         // redraws the background under it too — so measure in window space.
@@ -213,23 +222,33 @@ namespace
                                 : editor->getLocalArea (c, c->getLocalBounds());
         };
 
-        uiCase ("whole window", *editor, img, editor->getLocalBounds(), 25.0);
-        uiCase ("step grid, whole", *editor, img, areaOf (stepGrid), 25.0);
-        uiCase ("drum grid, whole", *editor, img, areaOf (drumGrid), 25.0);
-        uiCase ("song list, whole", *editor, img, areaOf (songList), 25.0);
+        uiCase ("whole window", *editor, img, editor->getLocalBounds(), modHz);
+        uiCase ("step grid, whole", *editor, img, areaOf (stepGrid), modHz);
+        uiCase ("drum grid, whole", *editor, img, areaOf (drumGrid), modHz);
+        uiCase ("song list, whole", *editor, img, areaOf (songList), modHz);
         uiCase ("pattern keys, whole", *editor, img, areaOf (keys), 8.0);
 
         // The EQ display, at the two rates it actually redraws: a band's strip
         // is what a moving level invalidates, up to ten times a frame with a
         // page open, and the whole plot is what moving a node invalidates,
-        // which only happens while one is being dragged.
-        if (auto* bands = findDescendant<EqBands> (*editor))
+        // which only happens while one is being dragged. The meters tick at
+        // `modHz`, not 25.
+        auto* bands = findDescendant<EqBands> (*editor);
+        if (bands != nullptr)
         {
             uiCase ("one EQ band strip", *editor, img,
-                    editor->getLocalArea (bands, bands->bandStrip (4)), 25.0);
+                    editor->getLocalArea (bands, bands->bandStrip (4)), modHz);
             uiCase ("EQ plot, whole", *editor, img,
-                    editor->getLocalArea (bands, bands->plotArea()), 25.0);
+                    editor->getLocalArea (bands, bands->plotArea()), modHz);
         }
+
+        // The two other continuous animators, now at `modHz`. The scope's dot
+        // moves every tick while the LFO is on; the pad repaints while held or
+        // while its sparks fade.
+        if (lfoScope != nullptr)
+            uiCase ("LFO scope, whole", *editor, img, areaOf (lfoScope), modHz);
+        if (xyPad != nullptr)
+            uiCase ("XY pad, whole", *editor, img, areaOf (xyPad), modHz);
 
         // Fixed cost of *any* repaint: the component tree walk, plus whatever
         // the background costs under a clip that throws nearly all of it away.
@@ -262,22 +281,39 @@ namespace
                   + drums) * 8.0;
         };
 
-        auto allTimers = [&] (juce::Image& into, float scale)
+        // The sum of the animating regions if each were painted on its own —
+        // what it would cost if the compositor honoured the separate dirty rects
+        // (the Metal renderer, or a host that does). This is the *floor*.
+        auto separateRects = [&] (juce::Image& into, float scale)
         {
-            return paintOnce (*editor, into, areaOf (stepGrid), 40, scale) * 25.0
-                 + paintOnce (*editor, into, areaOf (drumGrid), 40, scale) * 25.0
-                 + paintOnce (*editor, into, areaOf (songList), 40, scale) * 25.0
-                 + paintOnce (*editor, into, areaOf (keys),     40, scale) * 8.0;
+            double total = playing (into, scale);
+            if (bands != nullptr)
+                total += 2.0 * paintOnce (*editor, into,
+                                          editor->getLocalArea (bands, bands->plotArea()),
+                                          40, scale) * modHz;
+            if (lfoScope != nullptr)
+                total += paintOnce (*editor, into, areaOf (lfoScope), 40, scale) * modHz;
+            return total;
+        };
+
+        // What actually happens in Logic (confirmed by profiling the AU): the
+        // scattered rects a looping song invalidates each frame are fused into
+        // one whole-window paint, so the real cost is that paint at the frame
+        // rate — independent of how few pixels truly changed. This is the number
+        // the CPU meter shows.
+        auto coalesced = [&] (juce::Image& into, float scale)
+        {
+            return paintOnce (*editor, into, editor->getLocalBounds(), 20, scale) * modHz;
         };
 
         std::printf ("\n  steady state, as a share of one core:\n");
         std::printf ("  %-34s   %10s   %10s\n", "", "1x", "2x (Retina)");
         std::printf ("  %-34s   %9.1f%%   %9.1f%%\n",
-                     "every region redrawn every frame",
-                     100.0 * allTimers (img, 1.0f), 100.0 * allTimers (retina, 2.0f));
+                     "coalesced whole-window @ animHz",
+                     100.0 * coalesced (img, 1.0f), 100.0 * coalesced (retina, 2.0f));
         std::printf ("  %-34s   %9.1f%%   %9.1f%%\n",
-                     "playing: playhead cells at 8/s",
-                     100.0 * playing (img, 1.0f), 100.0 * playing (retina, 2.0f));
+                     "floor: separate rects honoured",
+                     100.0 * separateRects (img, 1.0f), 100.0 * separateRects (retina, 2.0f));
         std::printf ("  %-34s   %9.1f%%   %9.1f%%\n",
                      "stopped and untouched", 0.0, 0.0);
     }

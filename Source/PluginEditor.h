@@ -15,6 +15,19 @@ namespace ui303
     // end at all and stay the plain accent the whole way round.
     enum HotEnd { HotNone = 0, HotTop = 1, HotBottom = -1 };
 
+    // The rate every animating part of the editor polls and repaints at — the
+    // playhead grids, the EQ meters, the LFO scope, the XY pad. It is one number
+    // because on macOS the compositor fuses the separate dirty rectangles these
+    // produce in a frame into a single whole-window repaint (Core Graphics stops
+    // honouring per-rect draws past 10.13, and the Metal layer renderer that
+    // would keep them separate does not engage inside Logic's AU host). So the
+    // cost per frame is ~one whole-window paint regardless of how many parts
+    // moved, and the only linear lever left is how many frames a second there
+    // are. 12 Hz is one repaint per 16th up to ~180 BPM and roughly halves the
+    // 25 Hz these originally ran at; the playhead reads a touch steppier than at
+    // 15, which is the trade for the CPU. See the CPU note in CLAUDE.md.
+    constexpr int animHz = 12;
+
     struct Palette
     {
         bool retro = false;
@@ -136,7 +149,7 @@ private:
 class StepGrid : public juce::Component, private juce::Timer
 {
 public:
-    explicit StepGrid (BP303AudioProcessor& p) : proc (p) { startTimerHz (25); }
+    explicit StepGrid (BP303AudioProcessor& p) : proc (p) { startTimerHz (ui303::animHz); }
 
     // A held key sounds until the editor releases it, so an editor torn down
     // mid-note — a host closing the window, a device change — must not leave
@@ -240,7 +253,7 @@ private:
 class DrumGrid : public juce::Component, private juce::Timer
 {
 public:
-    explicit DrumGrid (BP303AudioProcessor& p) : proc (p) { startTimerHz (25); }
+    explicit DrumGrid (BP303AudioProcessor& p) : proc (p) { startTimerHz (ui303::animHz); }
 
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;

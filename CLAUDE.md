@@ -21,6 +21,15 @@ The AU installs itself to `~/Library/Audio/Plug-Ins/Components/` as a post-build
 step, so a successful build is already loadable in Logic. `BP303_Standalone`
 builds an app instead.
 
+**After building a new AU, also copy it into the project root**, overwriting the
+copy there — the build output is `build/BP303_artefacts/Release/AU/BP303.component`
+and it goes to `BP303.component` at the repo root (gitignored). One command,
+run after every `BP303_AU` build:
+
+```bash
+rm -rf ~/Documents/BP303/BP303.component && cp -R build/BP303_artefacts/Release/AU/BP303.component ~/Documents/BP303/BP303.component
+```
+
 Mac builds are universal (arm64 + x86_64) by default, which roughly doubles the
 link. Pass `-DCMAKE_OSX_ARCHITECTURES=arm64` when iterating.
 
@@ -296,6 +305,35 @@ for a JUCE type in these files costs the headless tests.
 **CPU cost is in the editor, not the DSP.** The DSP is around 1% of a core; editor
 repaints have been the expensive part. Measure with `BP303_PerfBench` before
 optimising anything, and don't go hunting for DSP savings that aren't there.
+Profiling the AU in Logic confirms it: a looping song sits near 30% with the
+window open and drops to ~1% the moment it is closed.
+
+**...and the editor cost is a whole-window paint, because macOS fuses the dirty
+rects.** Every animating part repaints a *small* region — a playhead cell, a
+meter strip, the LFO dot — but Core Graphics stopped honouring `getRectsBeingDrawn`
+past 10.13, so the scattered rects a frame invalidates are consolidated into one
+bounding box that spans nearly the whole window. So the per-frame cost is ~one
+full repaint (~10 ms) *regardless of how few pixels moved*, and `BP303_PerfBench`'s
+"coalesced whole-window @ animHz" line is the number the CPU meter actually shows;
+"floor: separate rects honoured" is what it would be if the fusing stopped. Two
+levers follow from this. Every animating component shares one rate, `ui303::animHz`
+(15 Hz), because frames-per-second is the only linear knob left once the cost per
+frame is fixed at a full paint — raise it for smoother playheads, lower it for
+less CPU. And the knobs are `setBufferedToImage`, so a full paint blits ~40 cached
+images instead of re-running `drawRotarySlider`. Don't give each animator its own
+rate again: independent rates still coalesce, and a shared one is what makes
+`animHz` a single honest dial.
+
+**Do not turn on `JUCE_COREGRAPHICS_RENDER_WITH_MULTIPLE_PAINT_CALLS`** to fight
+the coalescing. It looks like the right fix — it would keep the rects separate —
+but inside Logic's AU host the Metal layer it creates never drives its
+`displayLayer` callback, and that callback is the *only* place the peer clears
+`deferredRepaints` once a `metalRenderer` exists (see `setNeedsDisplayRectangles`
+in `juce_NSViewComponentPeer_mac.mm`: the `clear()` is guarded by
+`metalRenderer == nullptr`). The list then grows without bound and CPU *creeps*
+past 50% the longer the window stays open — resetting only when the editor is
+closed and the peer is destroyed. It also never improved the coalescing in Logic
+in the first place. The CMakeLists comment records this so it isn't tried again.
 
 **Every FX unit is off by default, and a bypassed unit ignores its controls.**
 `bflton`, `diston`, `delayon`, `bcompon`, `bchron`, `brevon`, `beqon` and their

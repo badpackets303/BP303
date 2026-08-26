@@ -2,6 +2,14 @@
 
 #include "MidiExport.h"
 
+namespace
+{
+    // All the continuously-animating components share one repaint rate — see
+    // ui303::animHz for why it is a single number and why it is as low as it is.
+    // Kept as a local alias so the free-run maths below reads in Hz.
+    constexpr int modDisplayHz = ui303::animHz;
+}
+
 //==============================================================================
 // Palettes
 
@@ -2141,7 +2149,7 @@ EqBands::EqBands (BP303AudioProcessor& p, int lineIndex) : proc (p), line (lineI
                 *param, [this] (float) { curveValid = false; repaint(); }, nullptr);
     }
 
-    startTimerHz (25);
+    startTimerHz (modDisplayHz);
 }
 
 void EqBands::resized()
@@ -2345,6 +2353,14 @@ void EqBands::timerCallback()
         const auto strip = bandStrip (b);
         const int lit = juce::roundToInt (proc.eqBandLevel (line, b)
                                           * (float) strip.getHeight());
+        // A deadband, not just "changed by a pixel". A sustained bass note
+        // decays smoothly, so its meter crosses a new pixel row almost every
+        // frame — and because the compositor fuses this repaint with the
+        // playhead's into a whole-window paint (see ui303::animHz), each of
+        // those costs a full frame. Ignoring sub-2px moves roughly halves how
+        // often that happens; 2px of a meter is below what reads as motion.
+        if (std::abs (lit - shownMeter[b]) < 2 && lit != 0 && shownMeter[b] != 0)
+            continue;
         if (lit == shownMeter[b])
             continue;
 
@@ -2493,7 +2509,7 @@ XyPad::XyPad (BP303AudioProcessor& p) : proc (p)
     if (auto* param = proc.apvts.getParameter ("padon"))   onAtt   = std::make_unique<juce::ParameterAttachment> (*param, redraw, nullptr);
     if (auto* param = proc.apvts.getParameter ("padmode")) modeAtt = std::make_unique<juce::ParameterAttachment> (*param, redraw, nullptr);
 
-    startTimerHz (25);
+    startTimerHz (modDisplayHz);
 }
 
 juce::Rectangle<int> XyPad::padArea() const
@@ -3608,7 +3624,7 @@ namespace
 
 SongList::SongList (BP303AudioProcessor& p) : proc (p)
 {
-    startTimerHz (25);
+    startTimerHz (ui303::animHz);
 }
 
 juce::String SongList::slotName (int slot)
@@ -4174,6 +4190,14 @@ void BP303AudioProcessorEditor::Knob::init (juce::Component& parent,
                                             bool bipolar)
 {
     parent.addAndMakeVisible (slider);
+    // A knob is expensive to draw — LED collar, value ring, cap highlight, and
+    // the pad/LFO arcs on top — and there are ~40 of them, so a forced full-
+    // window repaint (which macOS coalesces scattered dirty rects into) spends
+    // most of its time re-running drawRotarySlider for knobs that have not
+    // moved. Cached to an image, an unmoved knob is a blit; it re-renders only
+    // when it actually changes — a drag, a hover, or the pad/LFO moving its
+    // ring, all of which already call slider.repaint() and so invalidate it.
+    slider.setBufferedToImage (true);
     this->paramId = paramId;
     // The look-and-feel draws every knob through one function and has no idea
     // which parameter it is looking at, so the hot end rides along as a property.
