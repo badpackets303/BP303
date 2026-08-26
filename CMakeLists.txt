@@ -336,6 +336,22 @@ target_link_libraries(BP303_LfoWireTest PRIVATE
     juce::juce_dsp
     juce::juce_recommended_config_flags)
 
+# Headless test that VOLUME is a linear output trim rather than a drive into the
+# distortion — so turning it down cannot shorten a fuzzed note, only quieten it
+juce_add_console_app(BP303_VolumeTest PRODUCT_NAME "BP303_VolumeTest")
+target_sources(BP303_VolumeTest PRIVATE
+    Tools/volume_test.cpp
+    Source/PluginProcessor.cpp
+    Source/PluginEditor.cpp)
+target_compile_definitions(BP303_VolumeTest PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JucePlugin_Name="BP303")
+target_link_libraries(BP303_VolumeTest PRIVATE
+    juce::juce_audio_utils
+    juce::juce_dsp
+    juce::juce_recommended_config_flags)
+
 # Headless test that drawing into the LFO scope stores the level it looks like,
 # and that a step drawn up moves its knob up (with a positive depth) — one
 # negation in the whole screen-y-to-knob path, and this pins it

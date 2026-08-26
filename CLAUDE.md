@@ -46,7 +46,7 @@ behind `BP303_HAS_NATIVE_WINDOW` with an inline no-op fallback the way
 
 Two kinds, both headless. Run both before calling anything done.
 
-**CMake targets** — 41 of them, one per `Tools/*_test.cpp` that is wired up:
+**CMake targets** — 42 of them, one per `Tools/*_test.cpp` that is wired up:
 
 ```bash
 cmake --build build -j8 && for t in build/BP303_*Test_artefacts/Release/BP303_*Test; do "$t" >/dev/null || echo "FAIL $t"; done
@@ -254,6 +254,21 @@ directions. At 490 a band is still 45px, and the taller row took the curve from
 2.4 px/dB to 4.
 
 ## Constraints that are easy to break
+
+**VOLUME is a post-chain trim, not a level into the voice.** It used to be
+applied inside `Synth303`'s output, which put it *ahead of the distortion* — and
+because the fuzz is a fixed-threshold hard clipper, that made VOLUME set how hard
+a decaying note hit the clipper, i.e. its sustain, so turning it down made notes
+shorter as well as quieter. DRIVE is the control for driving the shaper. So the
+plugin now passes the voice 0 dB and applies the trim to the finished bass line,
+after the EQ and before the drums sum in (where `left`/`right` are bass-only).
+At the default 0 dB the trim is ×1.0 and skipped, so an undistorted line stays
+bit-identical and `master_test`/`stereo_bus_test`/`unison_test` still pass;
+`Tools/volume_test.cpp` pins the fix, that a driven-fuzz line at one volume is
+the line at another scaled sample-for-sample — a linear trim cannot move where a
+note crosses a threshold, so it cannot change the note's length. `Synth303`
+itself still applies `gain` for the offline tools that drive it directly; only
+the plugin routes around it.
 
 **The master stage must stay a mix, not a waveshaper.** It was a bare `tanh`
 across the summed output, which made the gain applied to the bass move with the

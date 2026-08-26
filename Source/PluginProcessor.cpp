@@ -1236,7 +1236,20 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
                                      apvts.getRawParameterValue ("envmod")->load());
     const float pDecay  = apvts.getRawParameterValue ("decay")->load();
     const float pAccent = apvts.getRawParameterValue ("accent")->load();
-    const float pVol    = apvts.getRawParameterValue ("volume")->load();
+
+    // VOLUME is a *post-chain* output trim, not a level into the voice. It used
+    // to be applied inside the voice (`gain` in Synth303's output), which put it
+    // ahead of the distortion — and since the fuzz is a fixed-threshold clipper,
+    // that made VOLUME set how hard the decaying note hit the clipper, i.e. its
+    // sustain, so turning it down made notes shorter as well as quieter. DRIVE
+    // is the control for driving the shaper; VOLUME is just level. So the voice
+    // now runs at unity (0 dB below) and the trim is applied to the finished
+    // bass line, after the EQ. At the default 0 dB the trim is x1.0 exactly, so
+    // an undistorted line is bit-identical to before — `master_test`,
+    // `stereo_bus_test` and `unison_test` all run at the default and still pass.
+    const float pVolDb  = apvts.getRawParameterValue ("volume")->load();
+    const float pVol    = 0.0f;   // the voice itself is unity now
+    const float bassTrim = juce::Decibels::decibelsToGain (pVolDb, -60.0f);
     const float pVibSpd = apvts.getRawParameterValue ("vibspeed")->load();
     const float pVibDep = apvts.getRawParameterValue ("vibdepth")->load();
     const float pAttack = apvts.getRawParameterValue ("attack")->load();
@@ -1775,6 +1788,18 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
         float gains[GraphicEq::numBands];
         bassEq.setParams (eqGains (0, gains), gains);
         bassEq.process (left, right, numSamples);
+    }
+
+    // VOLUME, the bass line's output trim. Here — after the whole bass FX chain
+    // and before the drums are summed in — is what makes it a level control
+    // rather than a drive into the distortion. `left`/`right` are bass-only at
+    // this point. Skipped at unity so the default stays bit-identical (x1.0 is
+    // exact, but not computing it is the same guarantee the flat-EQ branch
+    // makes, and it keeps the common case free).
+    if (bassTrim != 1.0f)
+    {
+        juce::FloatVectorOperations::multiply (left,  bassTrim, numSamples);
+        juce::FloatVectorOperations::multiply (right, bassTrim, numSamples);
     }
 
     // ---- Drums: sequencer pattern (Seq mode) plus live MIDI on channel 10
