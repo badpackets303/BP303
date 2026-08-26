@@ -431,6 +431,45 @@ int main()
                "an LFO must displace what the pad has already displaced");
     }
 
+    // --- the published rate matches the real advance ------------------------
+    // The scope free-runs its preview dot at `lfoRateHzNow` when the host has
+    // stopped calling processBlock. If that rate disagreed with the phase the
+    // audio actually advances, the parked preview would drift against the sound
+    // the moment playback resumed. So the published rate has to be the true
+    // per-second advance.
+    {
+        BP303AudioProcessor proc;
+        proc.prepareToPlay (44100.0, blockSize);
+        setP (proc, "lfo1on", 1.0f);
+        setP (proc, "lfo1amt", 0.9f);
+        setP (proc, "lfo1dest", 0.0f);
+        setP (proc, "lfo1sync", 0.0f);
+        setP (proc, "lfo1rate", 3.0f);
+
+        juce::AudioBuffer<float> buf (2, blockSize);
+        juce::MidiBuffer m;
+        buf.clear(); proc.processBlock (buf, m);
+        const double p0 = proc.lfoPhaseNow.load();
+        buf.clear(); proc.processBlock (buf, m);
+        const double p1 = proc.lfoPhaseNow.load();
+
+        const double measured = (p1 - p0) * 44100.0 / blockSize;   // cycles/sec
+        check (std::abs (measured - proc.lfoRateHzNow.load()) < 1.0e-6,
+               "the published LFO rate matches the phase it actually advances");
+        check (std::abs (proc.lfoRateHzNow.load() - 3.0) < 1.0e-6,
+               "...and a 3 Hz free LFO publishes 3 Hz");
+
+        // The unwrapped phase must pass whole cycles while the wrapped one stays
+        // in [0,1). This is what lets the sample & hold window scroll: its held
+        // value is a hash of floor(unwrapped), so if the phase the scope read
+        // never left [0,1) the window would be pinned to cycle 0 forever.
+        for (int b = 0; b < 40; ++b) { buf.clear(); proc.processBlock (buf, m); }
+        check (proc.lfoWholeNow.load() > 1.0,
+               "the unwrapped LFO phase advances past whole cycles");
+        check (proc.lfoPhaseNow.load() >= 0.0 && proc.lfoPhaseNow.load() < 1.0,
+               "...while the wrapped phase stays in [0,1)");
+    }
+
     std::printf (failures == 0 ? "ALL PASS\n" : "%d FAILED\n", failures);
     return failures == 0 ? 0 : 1;
 }

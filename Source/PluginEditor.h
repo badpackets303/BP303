@@ -562,7 +562,15 @@ private:
     // Only a moved dot or a changed shape costs a repaint. An LFO switched off
     // is a still picture, and a still picture should not cost 25 frames a second
     // in a plugin whose CPU has always been in the editor.
-    double lastPhase = -1.0;
+    // `displayPhase` is what the dot rides. It snaps to the audio thread's real
+    // phase whenever that is advancing (so a playing LFO shows exactly what is
+    // heard), and free-runs at the published rate when the real phase has
+    // frozen because the host stopped processing — which is what keeps the
+    // preview alive with the transport parked. `lastAudioPhase` is how it tells
+    // the two apart: a real phase that has not changed since last tick is idle.
+    double displayPhase = 0.0;
+    double lastAudioPhase = -1.0;
+
     int    lastShape = -1;
     float  lastDepth = 0.0f;
     bool   lastOn = false;

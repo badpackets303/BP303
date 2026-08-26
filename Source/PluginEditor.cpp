@@ -2714,26 +2714,45 @@ void XyPad::timerCallback()
 
 LfoScope::LfoScope (BP303AudioProcessor& p) : proc (p)
 {
-    startTimerHz (25);
+    startTimerHz (modDisplayHz);
 }
 
 void LfoScope::timerCallback()
 {
     const auto l = proc.readLfo();
-    const double phase = proc.lfoPhaseNow.load();
+    const double audioPhase = proc.lfoPhaseNow.load();
 
-    // A still LFO is a still picture. Repainting one 25 times a second is the
-    // kind of cost that made this plugin's CPU an editor problem in the first
-    // place, so only a moved dot or a changed drawing earns a frame.
-    const bool moved = std::abs (phase - lastPhase) > 1.0e-4;
-    if (! moved && l.shape == lastShape && l.depth == lastDepth && l.active() == lastOn
+    // Follow the audio thread's phase while it is advancing; when it has frozen
+    // — the host has stopped calling processBlock — free-run the dot at the
+    // published rate so a switched-on LFO still previews.
+    //
+    // Gated on `on`, not `active()`: clicking ACTIVE switches the LFO on but
+    // leaves AMOUNT at zero, and the user expects to *see* it running from that
+    // moment — AMOUNT is depth, not the on switch. `active()` (which needs a
+    // non-zero depth) governs what reaches the *sound*; the display follows the
+    // switch. An LFO switched off previews nothing, so a truly idle plugin
+    // still repaints nothing.
+    const double before = displayPhase;
+    if (audioPhase != lastAudioPhase)
+        displayPhase = audioPhase;                         // real phase is live
+    else if (l.on)
+    {
+        displayPhase += proc.lfoRateHzNow.load() / modDisplayHz;   // idle: preview
+        displayPhase -= std::floor (displayPhase);
+    }
+    lastAudioPhase = audioPhase;
+
+    // A still LFO is a still picture. Repainting one every tick is the kind of
+    // cost that made this plugin's CPU an editor problem in the first place, so
+    // only a moved dot or a changed drawing earns a frame.
+    const bool moved = std::abs (displayPhase - before) > 1.0e-4;
+    if (! moved && l.shape == lastShape && l.depth == lastDepth && l.on == lastOn
         && l.loopLen() == lastLen)
         return;
 
-    lastPhase = phase;
     lastShape = l.shape;
     lastDepth = l.depth;
-    lastOn    = l.active();
+    lastOn    = l.on;
     lastLen   = l.loopLen();
 
     // The transition to inactive reaches here too, which is what clears a stale
@@ -2858,6 +2877,11 @@ void LfoScope::paint (juce::Graphics& g)
     g.drawLine (r.getX(), r.getCentreY(), r.getRight(), r.getCentreY(), 1.0f);
 
     const auto l = proc.readLfo();
+    // `on` governs whether the tracker dot shows and moves — the user switched
+    // the LFO on and wants to see it, whatever AMOUNT is. `live` (needs depth)
+    // governs only how bright the wave is, since a zero-depth LFO is doing
+    // nothing to the sound yet.
+    const bool on   = l.on;
     const bool live = l.active();
     const bool drawable = l.shape == lfo::Custom;
 
@@ -2875,7 +2899,10 @@ void LfoScope::paint (juce::Graphics& g)
         }
     }
 
-    const double phase = proc.lfoPhaseNow.load();
+    // The dot rides `displayPhase`, which the timer keeps equal to the real
+    // phase while it advances and free-runs as a preview while the host is
+    // idle — so the tracker moves whether or not the transport is rolling.
+    const double phase = displayPhase;
 
     // The drawn shape draws slots, not time — the same rule the fitted drum lane
     // follows. All sixteen steps keep their own column whatever the loop length,
@@ -2902,8 +2929,7 @@ void LfoScope::paint (juce::Graphics& g)
             if (i == 0) loop.startNewSubPath (x, y);
             else        loop.lineTo (x, y);
         }
-        const float w = live ? juce::jmax (0.6f, std::abs (l.depth)) : 0.6f;
-        g.setColour (p.orange.withAlpha (w));
+        g.setColour (p.orange.withAlpha (0.6f));
         g.strokePath (loop, juce::PathStrokeType (1.6f));
 
         // The steps beyond the loop are still there to edit, just not played —
@@ -2925,7 +2951,7 @@ void LfoScope::paint (juce::Graphics& g)
         g.fillRect (markX - 3.0f, r.getY(), 6.0f, 4.0f);
         g.fillRect (markX - 3.0f, r.getBottom() - 4.0f, 6.0f, 4.0f);
 
-        if (! live)
+        if (! on)
             return;
 
         const double t = phase - std::floor (phase);
@@ -2948,9 +2974,15 @@ void LfoScope::paint (juce::Graphics& g)
     // matters because the held value is a hash of the cycle index: draw cycles
     // 0-3 while the audio is on cycle 97 and the picture would be a plausible
     // random pattern that is not the one being played.
-    const bool  steppy = l.shape == lfo::SampleHold;
-    const double span  = steppy ? 4.0 : 1.0;
-    const double start = steppy ? std::floor (phase) - 3.0 : 0.0;
+    // Sample & hold rides the *unwrapped* phase so its four-cycle window can
+    // scroll: each new hold is a hash of the cycle index, and a wrapped phase's
+    // floor is always zero, which pinned the window to the first four holds and
+    // left the dot bouncing in the last quarter over values that never changed.
+    // The periodic shapes keep the wrapped preview phase.
+    const bool   steppy    = l.shape == lfo::SampleHold;
+    const double drawPhase = steppy ? proc.lfoWholeNow.load() : phase;
+    const double span      = steppy ? 4.0 : 1.0;
+    const double start     = steppy ? std::floor (drawPhase) - 3.0 : 0.0;
 
     // Drawn from `lfo::Lfo::valueAt` itself, so the picture is the generator's
     // own output rather than a second opinion on what a sine looks like — the
@@ -2969,13 +3001,16 @@ void LfoScope::paint (juce::Graphics& g)
 
     // Depth scales the drawing's opacity rather than its height: at a glance
     // what matters is whether this is doing anything, and a shape squashed to a
-    // flat line would be indistinguishable from the wrong shape. (The drawn
-    // shape returns above, so this is only the periodic ones.)
-    const float weight = live ? juce::jlimit (0.25f, 1.0f, std::abs (l.depth)) : 0.18f;
-    g.setColour ((live ? p.orange : p.text).withAlpha (weight));
+    // flat line would be indistinguishable from the wrong shape. A switched-on
+    // LFO with no depth yet is drawn clearly (it is running, just not reaching
+    // the sound); a switched-off one is a faint ghost. (The drawn shape returns
+    // above, so this is only the periodic ones.)
+    const float weight = live ? juce::jlimit (0.25f, 1.0f, std::abs (l.depth))
+                              : (on ? 0.5f : 0.18f);
+    g.setColour ((on ? p.orange : p.text).withAlpha (weight));
     g.strokePath (wave, juce::PathStrokeType (1.6f));
 
-    if (! live)
+    if (! on)
         return;
 
     // The dot rides the wave at the phase the audio thread last used, so a
@@ -2983,9 +3018,9 @@ void LfoScope::paint (juce::Graphics& g)
     // loop, which is the whole reason that phase is derived rather than counted.
     // On the stepped window it lands in the last quarter, on the hold currently
     // sounding, with the three before it to its left.
-    const double u = (phase - start) / span;
+    const double u = (drawPhase - start) / span;
     const float dx = r.getX() + (float) u * r.getWidth();
-    const float dy = r.getCentreY() - l.valueAt (phase) * r.getHeight() * 0.42f;
+    const float dy = r.getCentreY() - l.valueAt (drawPhase) * r.getHeight() * 0.42f;
 
     g.setColour (p.orange.withAlpha (0.35f));
     g.drawLine (dx, r.getY(), dx, r.getBottom(), 1.0f);
@@ -4602,9 +4637,13 @@ BP303AudioProcessorEditor::BP303AudioProcessorEditor (BP303AudioProcessor& p)
     // RATE only means anything free-running and DIVISION only means anything
     // synced. The dead one greys rather than hiding, so the row does not reflow
     // every time SYNC is clicked.
+    // Reads the button's own state, not the parameter — for the same reason
+    // applyShape below takes its value as an argument. onStateChange fires from
+    // the button, whose toggle is already current, whereas the parameter cache
+    // behind getRawParameterValue may not have caught up yet.
     const auto followSync = [this]
     {
-        const bool synced = proc.apvts.getRawParameterValue ("lfo1sync")->load() >= 0.5f;
+        const bool synced = lfoSync.getToggleState();
         lfoRate.slider.setEnabled (! synced);
         lfoRate.label.setAlpha (synced ? 0.4f : 1.0f);
         lfoDiv.box.setEnabled (synced);
@@ -4615,18 +4654,28 @@ BP303AudioProcessorEditor::BP303AudioProcessorEditor (BP303AudioProcessor& p)
 
     // SMOOTH only means anything with DRAW selected. Greyed rather than hidden,
     // for the reason RATE and DIVISION are.
-    const auto followShape = [this]
+    //
+    // It takes the shape as an argument rather than re-reading the parameter,
+    // and that is the whole bug this once had: the attachment's notification can
+    // arrive before the APVTS has finished writing the shape into its own
+    // getRawParameterValue cache, so re-reading it there returned the *previous*
+    // shape and left SMOOTH greyed in DRAW mode (and lit outside it), lagging
+    // every change by one. The notification carries the new value already —
+    // `convertFrom0to1`'d to the choice index — so use that. `lfo_draw_test`
+    // pins it, switching shape back and forth.
+    const auto applyShape = [this] (int shapeIdx)
     {
-        const bool drawn = proc.apvts.getRawParameterValue ("lfo1shape")->load()
-                               == (float) lfo::Custom;
+        const bool drawn = shapeIdx == lfo::Custom;
         lfoSmooth.setEnabled (drawn);
         lfoSmooth.setAlpha (drawn ? 1.0f : 0.4f);
         lfoScope.repaint();
     };
     if (auto* shapeParam = proc.apvts.getParameter ("lfo1shape"))
         lfoShapeAtt = std::make_unique<juce::ParameterAttachment> (
-            *shapeParam, [followShape] (float) { followShape(); }, nullptr);
-    followShape();
+            *shapeParam,
+            [applyShape] (float v) { applyShape ((int) std::lround (v)); }, nullptr);
+    // The init read is safe — nothing is mid-notification at construction.
+    applyShape ((int) proc.apvts.getRawParameterValue ("lfo1shape")->load());
 
     lfoScope.onLfoMoved = [this] { updatePadKnobs(); };
 

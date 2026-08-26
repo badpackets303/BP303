@@ -86,6 +86,49 @@ int main()
     if (scope == nullptr)
         return 1;
 
+    // --- SMOOTH follows the shape, whatever the listener order ---------------
+    // SMOOTH only means anything with DRAW selected, so it greys otherwise. The
+    // trap: the handler must not re-read the shape parameter's cached value,
+    // because the notification that a control reacts to can arrive before the
+    // APVTS has finished updating that cache — so a fresh switch to DRAW would
+    // read the *previous* shape and leave SMOOTH greyed in DRAW mode. It has to
+    // act on the value the notification carries instead.
+    {
+        auto* smooth = [&]() -> juce::ToggleButton*
+        {
+            std::vector<juce::ToggleButton*> all;
+            std::function<void (juce::Component&)> walk = [&] (juce::Component& c)
+            {
+                for (auto* ch : c.getChildren())
+                {
+                    if (auto* b = dynamic_cast<juce::ToggleButton*> (ch))
+                        if (b->getButtonText() == "SMOOTH") all.push_back (b);
+                    walk (*ch);
+                }
+            };
+            walk (*editor);
+            return all.empty() ? nullptr : all.front();
+        }();
+
+        check (smooth != nullptr, "the SMOOTH button is in the editor");
+        if (smooth != nullptr)
+        {
+            setParam (proc, "lfo1shape", (float) lfo::Sine);
+            check (! smooth->isEnabled(), "SMOOTH is greyed on a non-drawn shape");
+
+            setParam (proc, "lfo1shape", (float) lfo::Custom);
+            check (smooth->isEnabled(), "SMOOTH enables the moment DRAW is selected");
+
+            setParam (proc, "lfo1shape", (float) lfo::Saw);
+            check (! smooth->isEnabled(), "...and greys again leaving DRAW");
+
+            setParam (proc, "lfo1shape", (float) lfo::Custom);
+            check (smooth->isEnabled(), "...and re-enables coming back to DRAW");
+        }
+    }
+
+    setParam (proc, "lfo1shape", (float) lfo::Custom);
+
     const auto r = scope->getLocalBounds().toFloat();
 
     // --- up is up ------------------------------------------------------------
@@ -187,6 +230,62 @@ int main()
         check ((int) proc.apvts.getRawParameterValue ("lfo1len")->load() == 8,
                "dragging the end marker to the middle sets an eight-step loop");
         scope->mouseUp (eventAt (*scope, { halfX, r.getCentreY() }));
+    }
+
+    // --- the tracker previews while the host is idle -------------------------
+    // The bug this guards: when the transport is parked the host stops calling
+    // processBlock, so the real phase freezes and the dot used to sit still
+    // until a knob nudge prompted a block — "the tracker only moves when I shift
+    // the amount knob". The scope now free-runs a preview at the published rate
+    // when the real phase is static, so an active LFO keeps animating. Here the
+    // real phase is held fixed and processBlock is never called, so any motion
+    // is the preview doing its job.
+    {
+        setParam (proc, "lfo1shape", (float) lfo::Sine);
+        setParam (proc, "lfo1on", 1.0f);
+        setParam (proc, "lfo1amt", 0.9f);
+        setParam (proc, "lfo1sync", 0.0f);
+
+        proc.lfoPhaseNow.store (0.0);      // frozen: the host is not processing
+        proc.lfoRateHzNow.store (5.0);     // but the LFO is configured to run
+
+        const auto frame = [&] { return scope->createComponentSnapshot (scope->getLocalBounds()); };
+
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (60);
+        const auto a = frame();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (120);
+        const auto b = frame();
+
+        const auto pixelsDiffer = [] (const juce::Image& x, const juce::Image& y)
+        {
+            for (int j = 0; j < x.getHeight(); ++j)
+                for (int i = 0; i < x.getWidth(); ++i)
+                    if (x.getPixelAt (i, j) != y.getPixelAt (i, j))
+                        return true;
+            return false;
+        };
+        check (pixelsDiffer (a, b), "the tracker previews with the transport parked");
+
+        // ...even at zero AMOUNT: switching the LFO on is what makes the tracker
+        // run, not turning the depth up. This is the reported bug — the dot used
+        // to sit still until AMOUNT was nudged.
+        setParam (proc, "lfo1amt", 0.0f);
+        proc.lfoPhaseNow.store (0.0);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (60);
+        const auto e = frame();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (120);
+        const auto f = frame();
+        check (pixelsDiffer (e, f), "the tracker runs at zero AMOUNT once switched on");
+
+        // ...and a switched-OFF LFO must NOT animate, or a truly idle plugin
+        // would repaint forever.
+        setParam (proc, "lfo1on", 0.0f);
+        proc.lfoPhaseNow.store (0.0);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (60);
+        const auto c = frame();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (120);
+        const auto d = frame();
+        check (! pixelsDiffer (c, d), "a switched-off LFO does not animate when idle");
     }
 
     std::printf (failures == 0 ? "ALL PASS\n" : "%d FAILED\n", failures);

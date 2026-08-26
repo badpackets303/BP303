@@ -523,14 +523,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout BP303AudioProcessor::createP
 
     // Free-running rate. Skewed like the cutoff knob so the slow end — where a
     // sweep lives — gets most of the travel instead of being crushed into the
-    // first eighth of it.
+    // first eighth of it. The default 0.25 Hz sits at a quarter of the knob's
+    // travel (the skew is why that is 0.25 Hz and not 5), a slow four-second
+    // sweep to match the one-bar synced default.
     layout.add (std::make_unique<AudioParameterFloat> (
         ParameterID { "lfo1rate", 1 }, "LFO 1 Rate",
-        NormalisableRange<float> (0.05f, 20.0f, 0.0f, 0.3f), 2.0f));
+        NormalisableRange<float> (0.05f, 20.0f, 0.0f, 0.3f), 0.25f));
 
     layout.add (std::make_unique<AudioParameterChoice> (
         ParameterID { "lfo1div", 1 }, "LFO 1 Division",
-        StringArray { "1 BAR", "1/2", "1/4", "1/8", "1/16" }, lfo::Eighth));
+        StringArray { "1 BAR", "1/2", "1/4", "1/8", "1/16" }, lfo::OneBar));
 
     layout.add (std::make_unique<AudioParameterChoice> (
         ParameterID { "lfo1dest", 1 }, "LFO 1 Destination",
@@ -1360,14 +1362,22 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
 
     // Advanced whether or not the LFO is live, so switching one on mid-note
     // starts it from where a running oscillator would be rather than from zero.
-    // Wrapped to keep the double from growing without bound over a long session.
+    // Wrapped at a large *whole* number of cycles rather than into [0,1): the
+    // fractional part is the phase, but `floor` of it is the cycle index sample
+    // & hold hashes, so collapsing it to [0,1) every block would peg every hold
+    // to cycle 0 and stop the pattern advancing. 2^20 cycles keeps the double
+    // bounded without losing the count.
     if (! lfoDerived)
     {
-        const double p = lfoFreePhase.load() + lfoRate * (double) numSamples;
-        lfoFreePhase.store (p - std::floor (p));
+        double p = lfoFreePhase.load() + lfoRate * (double) numSamples;
+        if (p >= 1048576.0)
+            p -= 1048576.0;
+        lfoFreePhase.store (p);
     }
 
-    lfoPhaseNow.store (lfoBase - std::floor (lfoBase));
+    lfoPhaseNow.store (lfoBase - std::floor (lfoBase));   // wrapped, for the dot
+    lfoWholeNow.store (lfoBase);                          // unwrapped, for S&H
+    lfoRateHzNow.store (lfoRate * sampleRateHz);          // cycles/sample -> cy/sec
 
     // Renders `n` samples through a voice, re-evaluating the LFO every
     // `lfo::modChunk` samples. With no LFO live it is the bare render call and

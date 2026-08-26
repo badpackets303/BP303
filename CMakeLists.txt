@@ -347,6 +347,9 @@ target_sources(BP303_LfoDrawTest PRIVATE
 target_compile_definitions(BP303_LfoDrawTest PRIVATE
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
+    # The preview check drives the scope's 25 Hz timer, which needs the message
+    # loop — the same dev-only exception the snapshot tools make.
+    JUCE_MODAL_LOOPS_PERMITTED=1
     JucePlugin_Name="BP303")
 target_link_libraries(BP303_LfoDrawTest PRIVATE
     juce::juce_audio_utils

@@ -577,6 +577,36 @@ too, which is what clears a stale ring off a knob the LFO has stopped pushing.
 A still LFO repaints nothing and `BP303_PerfBench` still reports 0.0% stopped
 and untouched.
 
+**The tracker follows the on switch, not the depth.** Clicking ACTIVE switches
+the LFO on but leaves AMOUNT at zero, and the user expects the dot to start
+running from that moment — AMOUNT is depth, not the on switch. So the dot draws
+and moves whenever `on` is true; `active()` (which needs a non-zero depth) still
+governs what reaches the *sound* and the knob rings. Gating the dot on `active()`
+was the bug where "the bar only moved when I nudged AMOUNT".
+
+**The scope's dot previews when the host stops processing.** A parked transport
+with nothing playing means the host stops calling `processBlock`, so the real
+phase freezes — and the dot used to sit still until a knob nudge prompted a
+block. So the scope rides `displayPhase`, which *follows* the real phase whenever
+it is advancing (a playing LFO shows exactly what is heard) and *free-runs* at
+the published `lfoRateHzNow` when it has frozen. Only a switched-on LFO previews,
+so a truly idle plugin still repaints nothing. The knob rings stay on the real
+phase, because a parked host is genuinely applying no modulation — the dot
+previews the shape, the rings show the (absent) effect. `lfo_draw_test` pins it:
+it animates parked-and-on at zero depth, and holds still parked-and-off.
+
+**Sample & hold rides the unwrapped phase, and the free run keeps whole cycles.**
+Its held value is a hash of the cycle index, so the scope draws a window of the
+last four cycles anchored to the real one — and `floor` of a phase wrapped into
+[0,1) is always zero, which pinned the window to cycle 0 and left the dot
+bouncing in the last quarter over values that never changed. So `lfoWholeNow`
+publishes the unwrapped phase for that window, while `lfoPhaseNow` stays wrapped
+for the periodic shapes' dot. For the same reason the free-running accumulator
+now wraps at 2^20 *cycles* rather than into [0,1): collapsing it every block
+would peg the S&H hash — in the audio, not just the display — to cycle 0.
+`lfo_wire_test` pins that the unwrapped phase passes whole cycles while the
+wrapped one stays in [0,1).
+
 **Adding a row means editing the layout twice.** `layoutContent` places the
 children and `paintContent` draws the panel frames, and they are separate walks
 over the same rows. A row added to one and not the other slides every frame

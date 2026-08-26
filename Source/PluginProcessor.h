@@ -358,6 +358,22 @@ public:
     // knob arcs go through `macropad::Pad::apply` instead of re-deriving.
     std::atomic<double> lfoPhaseNow { 0.0 };
 
+    // The LFO's advance in cycles per second, published so the scope can keep
+    // its dot moving as a *preview* when the host has stopped calling
+    // processBlock — transport parked, nothing playing — and the real phase
+    // above has therefore frozen. The scope snaps back to the real phase the
+    // moment it starts advancing again, so a playing LFO still shows exactly
+    // what is heard; this only fills the idle gap.
+    std::atomic<double> lfoRateHzNow { 0.0 };
+
+    // The LFO's *unwrapped* phase — cycles completed, not wrapped into [0,1).
+    // The sample & hold scope needs it: its held value is a hash of the cycle
+    // index, so it draws a window of the last four cycles anchored to the real
+    // one, and `floor` of a wrapped phase is always zero, which would peg the
+    // window to cycle 0 and stop it scrolling. `lfoPhaseNow` stays wrapped for
+    // the periodic shapes' dot.
+    std::atomic<double> lfoWholeNow { 0.0 };
+
 private:
 
     double sampleRateHz = 44100.0;   // captured in prepareToPlay
