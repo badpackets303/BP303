@@ -1,9 +1,15 @@
 cmake_minimum_required(VERSION 3.22)
-project(BP303 VERSION 0.1.0)
+project(BP303 VERSION 0.2.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
+
+# Same trap as the architectures below: project() has already cached an empty
+# deployment target, so a plain CACHE set() never took and builds quietly
+# required the macOS they were built on.
+if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version" FORCE)
+endif()
 
 # Both Mac architectures, so a released standalone runs on Intel as well as
 # Apple Silicon. Roughly doubles the build, so override it while developing:
