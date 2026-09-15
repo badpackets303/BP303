@@ -523,14 +523,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout BP303AudioProcessor::createP
 
     // Free-running rate. Skewed like the cutoff knob so the slow end — where a
     // sweep lives — gets most of the travel instead of being crushed into the
-    // first eighth of it.
+    // first eighth of it. The default 0.25 Hz sits at a quarter of the knob's
+    // travel (the skew is why that is 0.25 Hz and not 5), a slow four-second
+    // sweep to match the one-bar synced default.
     layout.add (std::make_unique<AudioParameterFloat> (
         ParameterID { "lfo1rate", 1 }, "LFO 1 Rate",
-        NormalisableRange<float> (0.05f, 20.0f, 0.0f, 0.3f), 2.0f));
+        NormalisableRange<float> (0.05f, 20.0f, 0.0f, 0.3f), 0.25f));
 
     layout.add (std::make_unique<AudioParameterChoice> (
         ParameterID { "lfo1div", 1 }, "LFO 1 Division",
-        StringArray { "1 BAR", "1/2", "1/4", "1/8", "1/16" }, lfo::Eighth));
+        StringArray { "1 BAR", "1/2", "1/4", "1/8", "1/16" }, lfo::OneBar));
 
     layout.add (std::make_unique<AudioParameterChoice> (
         ParameterID { "lfo1dest", 1 }, "LFO 1 Destination",
@@ -1234,7 +1236,20 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
                                      apvts.getRawParameterValue ("envmod")->load());
     const float pDecay  = apvts.getRawParameterValue ("decay")->load();
     const float pAccent = apvts.getRawParameterValue ("accent")->load();
-    const float pVol    = apvts.getRawParameterValue ("volume")->load();
+
+    // VOLUME is a *post-chain* output trim, not a level into the voice. It used
+    // to be applied inside the voice (`gain` in Synth303's output), which put it
+    // ahead of the distortion — and since the fuzz is a fixed-threshold clipper,
+    // that made VOLUME set how hard the decaying note hit the clipper, i.e. its
+    // sustain, so turning it down made notes shorter as well as quieter. DRIVE
+    // is the control for driving the shaper; VOLUME is just level. So the voice
+    // now runs at unity (0 dB below) and the trim is applied to the finished
+    // bass line, after the EQ. At the default 0 dB the trim is x1.0 exactly, so
+    // an undistorted line is bit-identical to before — `master_test`,
+    // `stereo_bus_test` and `unison_test` all run at the default and still pass.
+    const float pVolDb  = apvts.getRawParameterValue ("volume")->load();
+    const float pVol    = 0.0f;   // the voice itself is unity now
+    const float bassTrim = juce::Decibels::decibelsToGain (pVolDb, -60.0f);
     const float pVibSpd = apvts.getRawParameterValue ("vibspeed")->load();
     const float pVibDep = apvts.getRawParameterValue ("vibdepth")->load();
     const float pAttack = apvts.getRawParameterValue ("attack")->load();
@@ -1360,14 +1375,22 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
 
     // Advanced whether or not the LFO is live, so switching one on mid-note
     // starts it from where a running oscillator would be rather than from zero.
-    // Wrapped to keep the double from growing without bound over a long session.
+    // Wrapped at a large *whole* number of cycles rather than into [0,1): the
+    // fractional part is the phase, but `floor` of it is the cycle index sample
+    // & hold hashes, so collapsing it to [0,1) every block would peg every hold
+    // to cycle 0 and stop the pattern advancing. 2^20 cycles keeps the double
+    // bounded without losing the count.
     if (! lfoDerived)
     {
-        const double p = lfoFreePhase.load() + lfoRate * (double) numSamples;
-        lfoFreePhase.store (p - std::floor (p));
+        double p = lfoFreePhase.load() + lfoRate * (double) numSamples;
+        if (p >= 1048576.0)
+            p -= 1048576.0;
+        lfoFreePhase.store (p);
     }
 
-    lfoPhaseNow.store (lfoBase - std::floor (lfoBase));
+    lfoPhaseNow.store (lfoBase - std::floor (lfoBase));   // wrapped, for the dot
+    lfoWholeNow.store (lfoBase);                          // unwrapped, for S&H
+    lfoRateHzNow.store (lfoRate * sampleRateHz);          // cycles/sample -> cy/sec
 
     // Renders `n` samples through a voice, re-evaluating the LFO every
     // `lfo::modChunk` samples. With no LFO live it is the bare render call and
@@ -1765,6 +1788,18 @@ void BP303AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
         float gains[GraphicEq::numBands];
         bassEq.setParams (eqGains (0, gains), gains);
         bassEq.process (left, right, numSamples);
+    }
+
+    // VOLUME, the bass line's output trim. Here — after the whole bass FX chain
+    // and before the drums are summed in — is what makes it a level control
+    // rather than a drive into the distortion. `left`/`right` are bass-only at
+    // this point. Skipped at unity so the default stays bit-identical (x1.0 is
+    // exact, but not computing it is the same guarantee the flat-EQ branch
+    // makes, and it keeps the common case free).
+    if (bassTrim != 1.0f)
+    {
+        juce::FloatVectorOperations::multiply (left,  bassTrim, numSamples);
+        juce::FloatVectorOperations::multiply (right, bassTrim, numSamples);
     }
 
     // ---- Drums: sequencer pattern (Seq mode) plus live MIDI on channel 10

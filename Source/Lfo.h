@@ -92,8 +92,8 @@ struct Lfo
     bool  on    = false;
     int   shape = Sine;
     bool  sync  = true;
-    float rateHz = 2.0f;          // free-running rate, ignored while synced
-    int   div   = Eighth;         // synced rate, ignored while free
+    float rateHz = 0.25f;         // free-running rate, ignored while synced
+    int   div   = OneBar;         // synced rate, ignored while free
     macropad::Dest dest = macropad::numDests;
     float depth = 0.0f;           // normalised, -1..+1, a fraction of the knob's travel
 

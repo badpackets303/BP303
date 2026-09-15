@@ -21,6 +21,15 @@ The AU installs itself to `~/Library/Audio/Plug-Ins/Components/` as a post-build
 step, so a successful build is already loadable in Logic. `BP303_Standalone`
 builds an app instead.
 
+**After building a new AU, also copy it into the project root**, overwriting the
+copy there — the build output is `build/BP303_artefacts/Release/AU/BP303.component`
+and it goes to `BP303.component` at the repo root (gitignored). One command,
+run after every `BP303_AU` build:
+
+```bash
+rm -rf ~/Documents/BP303/BP303.component && cp -R build/BP303_artefacts/Release/AU/BP303.component ~/Documents/BP303/BP303.component
+```
+
 Mac builds are universal (arm64 + x86_64) by default, which roughly doubles the
 link. Pass `-DCMAKE_OSX_ARCHITECTURES=arm64` when iterating.
 
@@ -37,7 +46,7 @@ behind `BP303_HAS_NATIVE_WINDOW` with an inline no-op fallback the way
 
 Two kinds, both headless. Run both before calling anything done.
 
-**CMake targets** — 41 of them, one per `Tools/*_test.cpp` that is wired up:
+**CMake targets** — 42 of them, one per `Tools/*_test.cpp` that is wired up:
 
 ```bash
 cmake --build build -j8 && for t in build/BP303_*Test_artefacts/Release/BP303_*Test; do "$t" >/dev/null || echo "FAIL $t"; done
@@ -246,6 +255,21 @@ directions. At 490 a band is still 45px, and the taller row took the curve from
 
 ## Constraints that are easy to break
 
+**VOLUME is a post-chain trim, not a level into the voice.** It used to be
+applied inside `Synth303`'s output, which put it *ahead of the distortion* — and
+because the fuzz is a fixed-threshold hard clipper, that made VOLUME set how hard
+a decaying note hit the clipper, i.e. its sustain, so turning it down made notes
+shorter as well as quieter. DRIVE is the control for driving the shaper. So the
+plugin now passes the voice 0 dB and applies the trim to the finished bass line,
+after the EQ and before the drums sum in (where `left`/`right` are bass-only).
+At the default 0 dB the trim is ×1.0 and skipped, so an undistorted line stays
+bit-identical and `master_test`/`stereo_bus_test`/`unison_test` still pass;
+`Tools/volume_test.cpp` pins the fix, that a driven-fuzz line at one volume is
+the line at another scaled sample-for-sample — a linear trim cannot move where a
+note crosses a threshold, so it cannot change the note's length. `Synth303`
+itself still applies `gain` for the offline tools that drive it directly; only
+the plugin routes around it.
+
 **The master stage must stay a mix, not a waveshaper.** It was a bare `tanh`
 across the summed output, which made the gain applied to the bass move with the
 drum waveform — every kick amplitude-modulated the line and threw non-harmonic
@@ -296,6 +320,35 @@ for a JUCE type in these files costs the headless tests.
 **CPU cost is in the editor, not the DSP.** The DSP is around 1% of a core; editor
 repaints have been the expensive part. Measure with `BP303_PerfBench` before
 optimising anything, and don't go hunting for DSP savings that aren't there.
+Profiling the AU in Logic confirms it: a looping song sits near 30% with the
+window open and drops to ~1% the moment it is closed.
+
+**...and the editor cost is a whole-window paint, because macOS fuses the dirty
+rects.** Every animating part repaints a *small* region — a playhead cell, a
+meter strip, the LFO dot — but Core Graphics stopped honouring `getRectsBeingDrawn`
+past 10.13, so the scattered rects a frame invalidates are consolidated into one
+bounding box that spans nearly the whole window. So the per-frame cost is ~one
+full repaint (~10 ms) *regardless of how few pixels moved*, and `BP303_PerfBench`'s
+"coalesced whole-window @ animHz" line is the number the CPU meter actually shows;
+"floor: separate rects honoured" is what it would be if the fusing stopped. Two
+levers follow from this. Every animating component shares one rate, `ui303::animHz`
+(15 Hz), because frames-per-second is the only linear knob left once the cost per
+frame is fixed at a full paint — raise it for smoother playheads, lower it for
+less CPU. And the knobs are `setBufferedToImage`, so a full paint blits ~40 cached
+images instead of re-running `drawRotarySlider`. Don't give each animator its own
+rate again: independent rates still coalesce, and a shared one is what makes
+`animHz` a single honest dial.
+
+**Do not turn on `JUCE_COREGRAPHICS_RENDER_WITH_MULTIPLE_PAINT_CALLS`** to fight
+the coalescing. It looks like the right fix — it would keep the rects separate —
+but inside Logic's AU host the Metal layer it creates never drives its
+`displayLayer` callback, and that callback is the *only* place the peer clears
+`deferredRepaints` once a `metalRenderer` exists (see `setNeedsDisplayRectangles`
+in `juce_NSViewComponentPeer_mac.mm`: the `clear()` is guarded by
+`metalRenderer == nullptr`). The list then grows without bound and CPU *creeps*
+past 50% the longer the window stays open — resetting only when the editor is
+closed and the peer is destroyed. It also never improved the coalescing in Logic
+in the first place. The CMakeLists comment records this so it isn't tried again.
 
 **Every FX unit is off by default, and a bypassed unit ignores its controls.**
 `bflton`, `diston`, `delayon`, `bcompon`, `bchron`, `brevon`, `beqon` and their
@@ -538,6 +591,36 @@ still while the sound moved. The transition to inactive reaches the callback
 too, which is what clears a stale ring off a knob the LFO has stopped pushing.
 A still LFO repaints nothing and `BP303_PerfBench` still reports 0.0% stopped
 and untouched.
+
+**The tracker follows the on switch, not the depth.** Clicking ACTIVE switches
+the LFO on but leaves AMOUNT at zero, and the user expects the dot to start
+running from that moment — AMOUNT is depth, not the on switch. So the dot draws
+and moves whenever `on` is true; `active()` (which needs a non-zero depth) still
+governs what reaches the *sound* and the knob rings. Gating the dot on `active()`
+was the bug where "the bar only moved when I nudged AMOUNT".
+
+**The scope's dot previews when the host stops processing.** A parked transport
+with nothing playing means the host stops calling `processBlock`, so the real
+phase freezes — and the dot used to sit still until a knob nudge prompted a
+block. So the scope rides `displayPhase`, which *follows* the real phase whenever
+it is advancing (a playing LFO shows exactly what is heard) and *free-runs* at
+the published `lfoRateHzNow` when it has frozen. Only a switched-on LFO previews,
+so a truly idle plugin still repaints nothing. The knob rings stay on the real
+phase, because a parked host is genuinely applying no modulation — the dot
+previews the shape, the rings show the (absent) effect. `lfo_draw_test` pins it:
+it animates parked-and-on at zero depth, and holds still parked-and-off.
+
+**Sample & hold rides the unwrapped phase, and the free run keeps whole cycles.**
+Its held value is a hash of the cycle index, so the scope draws a window of the
+last four cycles anchored to the real one — and `floor` of a phase wrapped into
+[0,1) is always zero, which pinned the window to cycle 0 and left the dot
+bouncing in the last quarter over values that never changed. So `lfoWholeNow`
+publishes the unwrapped phase for that window, while `lfoPhaseNow` stays wrapped
+for the periodic shapes' dot. For the same reason the free-running accumulator
+now wraps at 2^20 *cycles* rather than into [0,1): collapsing it every block
+would peg the S&H hash — in the audio, not just the display — to cycle 0.
+`lfo_wire_test` pins that the unwrapped phase passes whole cycles while the
+wrapped one stays in [0,1).
 
 **Adding a row means editing the layout twice.** `layoutContent` places the
 children and `paintContent` draws the panel frames, and they are separate walks

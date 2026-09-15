@@ -48,6 +48,15 @@ target_compile_definitions(BP303 PUBLIC
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0)
+    # NOTE: do NOT enable JUCE_COREGRAPHICS_RENDER_WITH_MULTIPLE_PAINT_CALLS here.
+    # It was tried to stop macOS coalescing the editor's scattered dirty rects
+    # into whole-window paints, but inside Logic's AU host the Metal layer it
+    # creates never drives its `displayLayer` callback — which is the *only* place
+    # `deferredRepaints` is cleared when a metalRenderer exists (see
+    # juce_NSViewComponentPeer_mac.mm setNeedsDisplayRectangles). The list then
+    # grows without bound and CPU creeps past 50% the longer the window is open.
+    # It also never actually improved the coalescing in Logic. The editor's CPU
+    # is instead managed by ui303::animHz (frame rate) and knob image caching.
 
 # Native host-window centring (Objective-C++). Only the plugin gets the real
 # implementation; the console tools fall back to the header's inline no-op.
@@ -327,6 +336,22 @@ target_link_libraries(BP303_LfoWireTest PRIVATE
     juce::juce_dsp
     juce::juce_recommended_config_flags)
 
+# Headless test that VOLUME is a linear output trim rather than a drive into the
+# distortion — so turning it down cannot shorten a fuzzed note, only quieten it
+juce_add_console_app(BP303_VolumeTest PRODUCT_NAME "BP303_VolumeTest")
+target_sources(BP303_VolumeTest PRIVATE
+    Tools/volume_test.cpp
+    Source/PluginProcessor.cpp
+    Source/PluginEditor.cpp)
+target_compile_definitions(BP303_VolumeTest PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JucePlugin_Name="BP303")
+target_link_libraries(BP303_VolumeTest PRIVATE
+    juce::juce_audio_utils
+    juce::juce_dsp
+    juce::juce_recommended_config_flags)
+
 # Headless test that drawing into the LFO scope stores the level it looks like,
 # and that a step drawn up moves its knob up (with a positive depth) — one
 # negation in the whole screen-y-to-knob path, and this pins it
@@ -338,6 +363,9 @@ target_sources(BP303_LfoDrawTest PRIVATE
 target_compile_definitions(BP303_LfoDrawTest PRIVATE
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
+    # The preview check drives the scope's 25 Hz timer, which needs the message
+    # loop — the same dev-only exception the snapshot tools make.
+    JUCE_MODAL_LOOPS_PERMITTED=1
     JucePlugin_Name="BP303")
 target_link_libraries(BP303_LfoDrawTest PRIVATE
     juce::juce_audio_utils
