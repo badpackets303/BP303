@@ -12,20 +12,33 @@ macOS. The AU is what it was developed and tested against, in Logic Pro.
 
 ## Download
 
-Grab the standalone for your platform from
-[Releases](../../releases). Nothing to install — unzip and run.
+Grab the latest build from [Releases](../../releases).
 
-Neither build is code-signed, so the first launch needs one extra click:
+### macOS
 
-- **macOS** — right-click the app and choose *Open*, then *Open* again. Double-clicking
-  it the normal way will refuse the first time.
-- **Windows** — SmartScreen will warn once. Choose *More info*, then *Run anyway*.
+Two downloads, the Audio Unit and the standalone app. Both are universal (Apple
+Silicon and Intel) and run on macOS 11 or later. From v0.2.0 on they are signed
+with a Developer ID and notarized by Apple, so they open like any other download —
+no right-click, and nothing to run in Terminal.
 
-On Windows the audio runs on WASAPI, since the ASIO SDK can't be redistributed.
-That's fine for the sequencer, but if you're playing it live from a MIDI keyboard,
-open the audio settings and switch to exclusive mode with a small buffer.
+- **Audio Unit** — unzip it and move `BP303.component` into
+  `~/Library/Audio/Plug-Ins/Components/`, then open Logic Pro. BP303 is under
+  *AU Instruments → JC Audio*.
+- **Standalone** — unzip it and move `BP303.app` into *Applications*.
 
-Building the AU is a separate step — see [Building](#building).
+If Logic rejected an earlier, unsigned BP303, it remembers: open *Plug-in Manager*,
+select BP303 and choose *Reset & Rescan Selection*.
+
+v0.1.0 predates this — it was standalone-only and unsigned, and needed macOS 26.
+
+### Windows
+
+The standalone is not code-signed, so SmartScreen will warn once. Choose
+*More info*, then *Run anyway*.
+
+The audio runs on WASAPI, since the ASIO SDK can't be redistributed. That's fine
+for the sequencer, but if you're playing it live from a MIDI keyboard, open the
+audio settings and switch to exclusive mode with a small buffer.
 
 ## What's in it
 
@@ -83,8 +96,10 @@ build time. Pass `-DCMAKE_OSX_ARCHITECTURES=arm64` while developing.
 The first configure clones JUCE, so it takes a few minutes and the `build/`
 directory ends up around 1 GB.
 
-Release binaries are built by [CI](.github/workflows/build.yml) on both platforms
-— pushing a `v*` tag publishes them to Releases.
+[CI](.github/workflows/build.yml) builds and tests both platforms on every push
+and pull request, and pushing a `v*` tag attaches its standalone zips to a
+Release. Those CI builds are unsigned; the signed and notarized macOS downloads
+are built, signed and uploaded separately.
 
 ## Tests
 
